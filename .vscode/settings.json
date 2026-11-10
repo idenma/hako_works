@@ -1,0 +1,16 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^git status --short && printf '\\\\n--- top-level ---\\\\n' && git ls-files$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cargo fmt --check -- src/player\\.rs src/scene\\.rs$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cargo test prototype_progression_survives_chunk_unload_and_reload -- --exact scene::tests::prototype_progression_survives_chunk_unload_and_reload$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

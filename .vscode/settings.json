@@ -11,6 +11,11 @@
         "/^cargo test prototype_progression_survives_chunk_unload_and_reload -- --exact scene::tests::prototype_progression_survives_chunk_unload_and_reload$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^git status --short; printf '\\\\nRust toolchain:\\\\n'; if command -v rustc >/dev/null 2>&1; then rustc --version; else printf 'rustc: not found\\\\n'; fi; if command -v cargo >/dev/null 2>&1; then cargo --version; else printf 'cargo: not found\\\\n'; fi$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
-    }
+    },
+    "byokModels.debugLogging": true
 }

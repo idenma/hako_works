@@ -1,5 +1,6 @@
 // scene.rs
 use std::collections::{HashMap, HashSet};
+use std::f32::consts::FRAC_PI_2;
 
 use bevy::asset::{RenderAssetUsages, UntypedAssetLoadFailedEvent};
 use bevy::gltf::GltfAssetLabel;
@@ -10,6 +11,7 @@ use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use crate::inventory::{InventoryHud, ItemKind};
 use crate::player::{FollowCamera, PLAYER_GROUND_Y, Player};
+use crate::quest::{NotebookPage, NotebookState, QuestHint};
 use crate::world::{
     CHUNK_SIZE, ChunkCoord, ChunkDefinition, ColliderShape, ObjectInstanceId, ObjectKind,
     ObjectPlacement, RIVER_CHANNEL_CENTER_X_OFFSET, RIVER_CHANNEL_SURFACE_THICKNESS,
@@ -20,6 +22,8 @@ const CHUNK_LOAD_RADIUS: i32 = 1;
 const TERRAIN_MESH_SUBDIVISIONS: usize = 16;
 const NPC_START_X: f32 = 3.2;
 const NPC_DIALOGUE_DISTANCE: f32 = 6.0;
+const BRIDGE_ASSET_PATH: &str = "3D_Object/bridge.glb";
+const BRIDGE_MODEL_LENGTH: f32 = 2.411_107_5;
 
 #[derive(Component)]
 pub(crate) struct Interactable {
@@ -40,7 +44,7 @@ pub(crate) struct InteractionPopup;
 pub(crate) struct InteractionPrompt;
 
 #[derive(Component)]
-pub(crate) struct BridgePart;
+pub(crate) struct Bridge;
 
 #[derive(Component)]
 pub(crate) struct ChunkEntity(ChunkCoord);
@@ -65,11 +69,10 @@ pub(crate) struct WorldRenderAssets {
     ground_mesh: Handle<Mesh>,
     river_mesh: Handle<Mesh>,
     popup_mesh: Handle<Mesh>,
+    log_mesh: Handle<Mesh>,
     tree_scene: Handle<WorldAsset>,
     axe_scene: Handle<WorldAsset>,
-    log_scene: Handle<WorldAsset>,
-    bridge_deck_scene: Handle<WorldAsset>,
-    bridge_rail_scene: Handle<WorldAsset>,
+    bridge_scene: Handle<WorldAsset>,
     player_scene: Handle<WorldAsset>,
     npc_scene: Handle<WorldAsset>,
     ground_material: Handle<StandardMaterial>,
@@ -121,16 +124,13 @@ pub(crate) fn setup_scene(
             CHUNK_SIZE,
         )),
         popup_mesh: meshes.add(Cuboid::new(0.35, 0.35, 0.35)),
+        log_mesh: meshes.add(Cylinder::new(0.5, 1.0)),
         tree_scene: asset_server
             .load::<WorldAsset>(GltfAssetLabel::Scene(0).from_asset("3D_Object/tree_oak.glb")),
         axe_scene: asset_server
             .load::<WorldAsset>(GltfAssetLabel::Scene(0).from_asset("3D_Object/axe_pickup.glb")),
-        log_scene: asset_server
-            .load::<WorldAsset>(GltfAssetLabel::Scene(0).from_asset("3D_Object/bridge_log.glb")),
-        bridge_deck_scene: asset_server
-            .load::<WorldAsset>(GltfAssetLabel::Scene(0).from_asset("3D_Object/bridge_deck.glb")),
-        bridge_rail_scene: asset_server
-            .load::<WorldAsset>(GltfAssetLabel::Scene(0).from_asset("3D_Object/bridge_rail.glb")),
+        bridge_scene: asset_server
+            .load::<WorldAsset>(GltfAssetLabel::Scene(0).from_asset(BRIDGE_ASSET_PATH)),
         player_scene: asset_server
             .load::<WorldAsset>(GltfAssetLabel::Scene(0).from_asset("3D_Object/player.glb")),
         npc_scene: asset_server
@@ -225,6 +225,8 @@ pub(crate) fn validate_required_entities(// 必須のEntityが存在すること
     interaction_prompts: Query<(), With<InteractionPrompt>>,
     npcs: Query<(), With<RiversideNpc>>,
     dialogue_huds: Query<(), With<NpcDialogueHud>>,
+    notebook_pages: Query<(), With<NotebookPage>>,
+    quest_hints: Query<(), With<QuestHint>>,
 ) {
     report_singleton_entity("プレイヤー", players.iter().count());
     report_singleton_entity("カメラ", cameras.iter().count());
@@ -232,6 +234,8 @@ pub(crate) fn validate_required_entities(// 必須のEntityが存在すること
     report_singleton_entity("操作案内HUD", interaction_prompts.iter().count());
     report_singleton_entity("川辺のNPC", npcs.iter().count());
     report_singleton_entity("NPCの会話HUD", dialogue_huds.iter().count());
+    report_singleton_entity("メモ帳", notebook_pages.iter().count());
+    report_singleton_entity("クエスト案内HUD", quest_hints.iter().count());
 }
 
 fn report_singleton_entity(name: &str, count: usize) {// 指定されたEntityが1つだけ存在することを確認する
@@ -262,6 +266,7 @@ fn spawn_riverside_npc(commands: &mut Commands, assets: &WorldRenderAssets) {
 
 pub(crate) fn update_riverside_npc(// 川辺のNPCの会話HUDを更新する
     flags: Res<WorldFlags>,
+    notebook: Res<NotebookState>,
     players: Query<&Transform, (With<Player>, Without<RiversideNpc>)>,
     npcs: Query<&Transform, (With<RiversideNpc>, Without<Player>)>,
     mut dialogue_huds: Query<(&mut Text, &mut Visibility), With<NpcDialogueHud>>,
@@ -272,15 +277,21 @@ pub(crate) fn update_riverside_npc(// 川辺のNPCの会話HUDを更新する
         return;
     };
 
-    text.0 = riverside_npc_line(flags.is_set(WorldFlag::BridgeBuilt)).to_owned();
-    *visibility = if is_near_npc(player_transform.translation, npc_transform.translation) {
-        Visibility::Visible
-    } else {
-        Visibility::Hidden
-    };
+    text.set_if_neq(Text::new(riverside_npc_line(
+        flags.is_set(WorldFlag::BridgeBuilt),
+    )));
+    visibility.set_if_neq(
+        if !notebook.is_open()
+            && is_near_npc(player_transform.translation, npc_transform.translation)
+        {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        },
+    );
 }
 
-fn is_near_npc(player_position: Vec3, npc_position: Vec3) -> bool {
+pub(crate) fn is_near_npc(player_position: Vec3, npc_position: Vec3) -> bool {
     // プレイヤーがNPCの会話範囲内にいるかどうかを判定する
     let offset = player_position - npc_position;
     Vec2::new(offset.x, offset.z).length_squared() <= NPC_DIALOGUE_DISTANCE.powi(2)
@@ -537,61 +548,75 @@ fn spawn_object(
         return;
     }
 
-    let model = match placement.kind {// 配置の種類に応じて描画用のモデルを選択する
-        ObjectKind::Log => assets.log_scene.clone(),
-        ObjectKind::BridgeDeck => assets.bridge_deck_scene.clone(),
-        ObjectKind::BridgeRail => assets.bridge_rail_scene.clone(),
-        ObjectKind::Tree | ObjectKind::AxePickup => unreachable!(),
-    };
-    let transform = Transform {// 配置の位置と回転を設定する
+    let transform = Transform {
         translation: world_position,
         rotation: placement.rotation,
         ..default()
     };
-    let components = (
-        // 配置のEntityに付与するコンポーネントをまとめる
-        ObjectEntity(placement.id),
-        ObjectCollider(placement.collider),
-        WorldAssetRoot(model),
-        transform,
-    );
+    let ColliderShape::Box { half_extents } = placement.collider else {
+        panic!("橋または建設地点のColliderは直方体である必要があります: {}", placement.id.0);
+    };
 
-    if placement.kind == ObjectKind::Log {
-        // 丸太の配置は橋を作るための対話アクションを持つのでInteractionPopupを生成する
-        let target = commands
-            .spawn((
-                ChildOf(chunk_root),
-                components,
-                Interactable {
-                    action: InteractionAction::BuildBridge(
-                        placement
-                            .completion_flag
-                            .expect("bridge site must have a completion flag"),
-                    ),
-                },
+    match placement.kind {
+        ObjectKind::Log => {
+            let target = commands
+                .spawn((
+                    ChildOf(chunk_root),
+                    ObjectEntity(placement.id),
+                    ObjectCollider(placement.collider),
+                    Interactable {
+                        action: InteractionAction::BuildBridge(
+                            placement
+                                .completion_flag
+                                .expect("bridge site must have a completion flag"),
+                        ),
+                    },
+                    transform,
+                    Visibility::Inherited,
+                ))
+                .id();
+            commands.spawn((
+                ChildOf(target),
+                Mesh3d(assets.log_mesh.clone()),
+                MeshMaterial3d(assets.object_material.clone()),
+                Transform::from_rotation(Quat::from_rotation_z(FRAC_PI_2)).with_scale(Vec3::new(
+                    half_extents.y * 2.0,
+                    half_extents.x * 2.0,
+                    half_extents.z * 2.0,
+                )),
+            ));
+            spawn_interaction_popup(commands, assets, target, 1.2);
+        }
+        ObjectKind::Bridge => {
+            let bridge = commands
+                .spawn((
+                    ChildOf(chunk_root),
+                    Bridge,
+                    ObjectEntity(placement.id),
+                    ObjectCollider(placement.collider),
+                    transform,
+                    if flags.is_set(WorldFlag::BridgeBuilt) {
+                        Visibility::Visible
+                    } else {
+                        Visibility::Hidden
+                    },
+                ))
+                .id();
+            commands.spawn((
+                ChildOf(bridge),
+                WorldAssetRoot(assets.bridge_scene.clone()),
+                bridge_model_transform(half_extents),
                 Visibility::Inherited,
-            ))
-            .id();
-        commands.spawn((
-            InteractionPopup,
-            ChildOf(target),
-            Mesh3d(assets.popup_mesh.clone()),
-            MeshMaterial3d(assets.object_material.clone()),
-            Transform::from_xyz(0.0, 1.2, 0.0),
-            Visibility::Hidden,
-        ));
-    } else {
-        commands.spawn((
-            ChildOf(chunk_root),
-            BridgePart,
-            if flags.is_set(WorldFlag::BridgeBuilt) {
-                Visibility::Visible
-            } else {
-                Visibility::Hidden
-            },
-            components,
-        ));
+            ));
+        }
+        ObjectKind::Tree | ObjectKind::AxePickup => unreachable!(),
     }
+}
+
+fn bridge_model_transform(half_extents: Vec3) -> Transform {
+    // GLBの長手方向はZ、橋の通行判定の長手方向はX。
+    let scale = half_extents.x * 2.0 / BRIDGE_MODEL_LENGTH;
+    Transform::from_rotation(Quat::from_rotation_y(FRAC_PI_2)).with_scale(Vec3::splat(scale))
 }
 
 fn spawn_interaction_popup(// 配置のEntityの上にInteractionPopupを生成する
@@ -610,13 +635,13 @@ fn spawn_interaction_popup(// 配置のEntityの上にInteractionPopupを生成�
     ));
 }
 
-pub(crate) fn react_to_flag_changes(// WorldFlagの変更に応じて、橋のパーツの表示状態を切り替える
+pub(crate) fn react_to_flag_changes(// WorldFlagの変更に応じて、橋の表示状態を切り替える
     mut flag_changed: MessageReader<FlagChanged>,
-    mut bridge_parts: Query<&mut Visibility, With<BridgePart>>,
+    mut bridges: Query<&mut Visibility, With<Bridge>>,
 ) {
     for change in flag_changed.read() {
         if change.flag == WorldFlag::BridgeBuilt && change.value {
-            for mut visibility in &mut bridge_parts {
+            for mut visibility in &mut bridges {
                 *visibility = Visibility::Visible;
             }
         }
@@ -626,9 +651,12 @@ pub(crate) fn react_to_flag_changes(// WorldFlagの変更に応じて、橋の�
 #[cfg(test)]
 mod tests {// テスト用のモジュール
     use super::*;
+    use bevy::camera::visibility::{InheritedVisibility, VisibilityPlugin};
+    use bevy::transform::TransformPlugin;
     use crate::interaction::perform_interaction;
     use crate::inventory::{Inventory, ItemKind, select_inventory_item};
-    use crate::player::PLAYER_GROUND_Y;
+    use crate::player::{PLAYER_GROUND_Y, PLAYER_HALF_SIZE};
+    use crate::quest::{self, BRIDGE_QUEST_ID, NotebookState, QuestLog};
     use crate::world::{ObjectInstanceId, WorldMap};
 
     #[test]
@@ -671,16 +699,224 @@ mod tests {// テスト用のモジュール
     }
 
     #[test]
+    fn late_loaded_model_inherits_unchanged_popup_visibility() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>()
+            .add_plugins((TransformPlugin, VisibilityPlugin));
+        let parent = app
+            .world_mut()
+            .spawn((Transform::default(), Visibility::Inherited))
+            .id();
+        let popup = app
+            .world_mut()
+            .spawn((
+                ChildOf(parent),
+                Transform::default(),
+                Visibility::Hidden,
+            ))
+            .id();
+        app.update();
+        assert!(
+            !app.world()
+                .get::<InheritedVisibility>(popup)
+                .expect("popup has inherited visibility")
+                .get()
+        );
+
+        app.world_mut()
+            .entity_mut(popup)
+            .insert(Visibility::Visible);
+        app.update();
+        assert!(
+            app.world()
+                .get::<InheritedVisibility>(popup)
+                .expect("popup has inherited visibility")
+                .get()
+        );
+
+        // WorldAssetRoot may attach its scene hierarchy after the popup has become visible.
+        let model_root = app
+            .world_mut()
+            .spawn((
+                ChildOf(popup),
+                Transform::default(),
+                Visibility::Inherited,
+            ))
+            .id();
+        let model = app
+            .world_mut()
+            .spawn((
+                ChildOf(model_root),
+                Transform::default(),
+                Visibility::Inherited,
+                Mesh3d(Handle::default()),
+            ))
+            .id();
+        app.update();
+        assert!(
+            app.world()
+                .get::<InheritedVisibility>(model)
+                .expect("model has inherited visibility")
+                .get()
+        );
+
+        app.world_mut()
+            .entity_mut(popup)
+            .insert(Visibility::Hidden);
+        app.update();
+        assert!(
+            !app.world()
+                .get::<InheritedVisibility>(model)
+                .expect("model has inherited visibility")
+                .get()
+        );
+    }
+
+    #[test]
+    fn bridge_asset_fits_the_river_and_its_collision_bounds() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(BRIDGE_ASSET_PATH);
+        let gltf = bevy::gltf::gltf::Gltf::open(&path).expect("bridge GLB must be valid");
+        assert!(gltf.blob.is_some(), "bridge GLB must contain its mesh data");
+        let scene = gltf.document.scenes().next().expect("bridge GLB needs Scene0");
+        let mut bounds = None;
+        for node in scene.nodes() {
+            extend_gltf_bounds(node, Mat4::IDENTITY, &mut bounds);
+        }
+        let (model_min, model_max) = bounds.expect("bridge Scene0 must contain a mesh");
+        assert!(((model_max.z - model_min.z) - BRIDGE_MODEL_LENGTH).abs() < 0.001);
+
+        let map = WorldMap::prototype();
+        let bridge = map.chunks[&ChunkCoord { x: 10, z: 10 }]
+            .objects
+            .iter()
+            .find(|object| object.kind == ObjectKind::Bridge)
+            .expect("prototype contains the bridge");
+        let ColliderShape::Box { half_extents } = bridge.collider else {
+            panic!("bridge must use a box collider");
+        };
+        let (render_min, render_max) = transform_bounds(
+            (model_min, model_max),
+            bridge_model_transform(half_extents).to_matrix(),
+        );
+        assert!((render_max.x - render_min.x - 2.0 * half_extents.x).abs() < 0.001);
+        assert!(render_min.x <= -RIVER_CHANNEL_WIDTH / 2.0);
+        assert!(render_max.x >= RIVER_CHANNEL_WIDTH / 2.0);
+        assert!(render_min.z <= -half_extents.z);
+        assert!(render_max.z >= half_extents.z);
+    }
+
+    #[test]
+    fn bridge_scene_loads_with_the_bevy_asset_server() {
+        use bevy::app::TaskPoolPlugin;
+        use bevy::asset::{AssetApp, AssetPlugin, LoadState, RecursiveDependencyLoadState};
+        use bevy::gltf::GltfPlugin;
+        use bevy::mesh::MeshPlugin;
+        use bevy::world_serialization::WorldSerializationPlugin;
+        use std::time::{Duration, Instant};
+
+        let assets_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let mut app = App::new();
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            AssetPlugin {
+                file_path: assets_path.to_string_lossy().into_owned(),
+                ..default()
+            },
+            WorldSerializationPlugin,
+            MeshPlugin,
+            GltfPlugin::default(),
+        ))
+        .init_asset::<Image>();
+        app.finish();
+        app.cleanup();
+
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        let handle: Handle<WorldAsset> =
+            asset_server.load(GltfAssetLabel::Scene(0).from_asset(BRIDGE_ASSET_PATH));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            app.update();
+            if let LoadState::Failed(error) = asset_server.load_state(handle.id()) {
+                panic!("bridge scene failed to load: {error}");
+            }
+            if let RecursiveDependencyLoadState::Failed(error) =
+                asset_server.recursive_dependency_load_state(handle.id())
+            {
+                panic!("bridge scene dependency failed to load: {error}");
+            }
+            if asset_server.is_loaded_with_dependencies(handle.id()) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "bridge scene loading timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let mut world_assets = app.world_mut().resource_mut::<Assets<WorldAsset>>();
+        let mut bridge_scene = world_assets
+            .get_mut(&handle)
+            .expect("loaded bridge scene is available");
+        let mut meshes = bridge_scene.world.query::<&Mesh3d>();
+        assert!(meshes.iter(&bridge_scene.world).next().is_some());
+    }
+
+    fn extend_gltf_bounds(
+        node: bevy::gltf::gltf::Node<'_>,
+        parent_transform: Mat4,
+        bounds: &mut Option<(Vec3, Vec3)>,
+    ) {
+        let transform = parent_transform * Mat4::from_cols_array_2d(&node.transform().matrix());
+        if let Some(mesh) = node.mesh() {
+            for primitive in mesh.primitives() {
+                let bounding_box = primitive.bounding_box();
+                let primitive_bounds = transform_bounds(
+                    (
+                        Vec3::from_array(bounding_box.min),
+                        Vec3::from_array(bounding_box.max),
+                    ),
+                    transform,
+                );
+                match bounds {
+                    Some((min, max)) => {
+                        *min = min.min(primitive_bounds.0);
+                        *max = max.max(primitive_bounds.1);
+                    }
+                    None => *bounds = Some(primitive_bounds),
+                }
+            }
+        }
+        for child in node.children() {
+            extend_gltf_bounds(child, transform, bounds);
+        }
+    }
+
+    fn transform_bounds((min, max): (Vec3, Vec3), transform: Mat4) -> (Vec3, Vec3) {
+        let mut transformed_min = Vec3::splat(f32::INFINITY);
+        let mut transformed_max = Vec3::splat(f32::NEG_INFINITY);
+        for x in [min.x, max.x] {
+            for y in [min.y, max.y] {
+                for z in [min.z, max.z] {
+                    let point = transform.transform_point3(Vec3::new(x, y, z));
+                    transformed_min = transformed_min.min(point);
+                    transformed_max = transformed_max.max(point);
+                }
+            }
+        }
+        (transformed_min, transformed_max)
+    }
+
+    #[test]
     fn prototype_progression_survives_chunk_unload_and_reload() {
         let render_assets = WorldRenderAssets {
             ground_mesh: Handle::default(),
             river_mesh: Handle::default(),
             popup_mesh: Handle::default(),
+            log_mesh: Handle::default(),
             tree_scene: Handle::default(),
             axe_scene: Handle::default(),
-            log_scene: Handle::default(),
-            bridge_deck_scene: Handle::default(),
-            bridge_rail_scene: Handle::default(),
+            bridge_scene: Handle::default(),
             player_scene: Handle::default(),
             npc_scene: Handle::default(),
             ground_material: Handle::default(),
@@ -694,15 +930,19 @@ mod tests {// テスト用のモジュール
             .init_resource::<WorldFlags>()
             .init_resource::<WorldProgress>()
             .init_resource::<Inventory>()
+            .init_resource::<QuestLog>()
+            .init_resource::<NotebookState>()
             .init_resource::<ButtonInput<KeyCode>>()
             .add_message::<FlagChanged>()
             .add_systems(
                 Update,
                 (
+                    quest::toggle_notebook,
                     sync_loaded_chunks,
-                    select_inventory_item,
-                    perform_interaction,
+                    select_inventory_item.run_if(quest::gameplay_enabled),
+                    perform_interaction.run_if(quest::gameplay_enabled),
                     react_to_flag_changes,
+                    quest::update_quests,
                 )
                     .chain(),
             );
@@ -714,7 +954,58 @@ mod tests {// テスト用のモジュール
                 Transform::from_xyz(1.0, PLAYER_GROUND_Y, 1.0),
             ))
             .id();
+        app.world_mut()
+            .spawn((RiversideNpc, Transform::from_xyz(NPC_START_X, 0.0, 0.0)));
         app.update();
+        assert!(app.world().resource::<QuestLog>().has_started(BRIDGE_QUEST_ID));
+
+        let mut bridges = app
+            .world_mut()
+            .query_filtered::<(Entity, &ObjectEntity, &Visibility), With<Bridge>>();
+        let (bridge_entity, bridge_object, bridge_visibility) = bridges
+            .single(app.world())
+            .expect("one bridge is loaded before construction");
+        assert_eq!(bridge_object.0, ObjectInstanceId(2));
+        assert_eq!(*bridge_visibility, Visibility::Hidden);
+        let mut bridge_models = app
+            .world_mut()
+            .query::<(&ChildOf, &WorldAssetRoot, &Transform)>();
+        let (_, model, model_transform) = bridge_models
+            .iter(app.world())
+            .find(|(parent, _, _)| parent.parent() == bridge_entity)
+            .expect("the bridge has one GLB model");
+        assert_eq!(model.0, app.world().resource::<WorldRenderAssets>().bridge_scene);
+        assert!((model_transform.rotation * Vec3::Z - Vec3::X).length() < 0.001);
+
+        let mut targets = app
+            .world_mut()
+            .query::<(Entity, &ObjectEntity, &ObjectCollider, &Transform, &Interactable)>();
+        let (site, site_collider, site_transform) = targets
+            .iter(app.world())
+            .find(|(_, object, _, _, _)| object.0 == ObjectInstanceId(1))
+            .map(|(entity, _, collider, transform, _)| (entity, collider, transform))
+            .expect("the bridge build site is available");
+        let ColliderShape::Box { half_extents } = site_collider.0 else {
+            panic!("bridge site must use a box collider");
+        };
+        assert!(site_transform.translation.z.abs() > half_extents.z + PLAYER_HALF_SIZE);
+        let mut markers = app.world_mut().query::<(&ChildOf, &Mesh3d, &Transform)>();
+        let (_, _, marker_transform) = markers
+            .iter(app.world())
+            .find(|(parent, _, transform)| {
+                parent.parent() == site
+                    && transform.scale.distance(Vec3::new(0.36, 1.6, 0.45)) < 0.001
+            })
+            .expect("the build site has a visible log marker");
+        assert!((marker_transform.rotation * Vec3::Y + Vec3::X).length() < 0.001);
+
+        press_key_and_update(&mut app, KeyCode::KeyN);
+        assert!(app.world().resource::<NotebookState>().is_open());
+        press_key_and_update(&mut app, KeyCode::KeyE);
+        assert_eq!(app.world().resource::<Inventory>().count(ItemKind::Axe), 0);
+        press_keys_and_update(&mut app, &[KeyCode::KeyN, KeyCode::KeyE]);
+        assert!(!app.world().resource::<NotebookState>().is_open());
+        assert_eq!(app.world().resource::<Inventory>().count(ItemKind::Axe), 0);
 
         press_key_and_update(&mut app, KeyCode::KeyE);
         assert_eq!(
@@ -750,6 +1041,10 @@ mod tests {// テスト用のモジュール
                 .contains(&ObjectInstanceId(501))
         );
 
+        press_key_and_update(&mut app, KeyCode::KeyN);
+        press_key_and_update(&mut app, KeyCode::Digit2);
+        assert!(app.world().resource::<Inventory>().is_selected(ItemKind::Axe));
+        press_key_and_update(&mut app, KeyCode::KeyN);
         press_key_and_update(&mut app, KeyCode::Digit2);
         assert!(
             app.world()
@@ -762,9 +1057,19 @@ mod tests {// テスト用のモジュール
             .translation = Vec3::new(3.0, PLAYER_GROUND_Y, 0.0);
         press_key_and_update(&mut app, KeyCode::KeyE);
         assert!(app.world().resource::<WorldFlags>().is_set(WorldFlag::BridgeBuilt));
+        assert!(app.world().get_entity(site).is_err());
         assert_eq!(
             app.world().resource::<Inventory>().count(ItemKind::Wood),
             0
+        );
+        assert_eq!(
+            app.world().resource::<Inventory>().count(ItemKind::Axe),
+            1
+        );
+        let mut bridges = app.world_mut().query_filtered::<&Visibility, With<Bridge>>();
+        assert_eq!(
+            *bridges.single(app.world()).expect("built bridge is loaded"),
+            Visibility::Visible
         );
 
         app.world_mut()
@@ -787,16 +1092,12 @@ mod tests {// テスト用のモジュール
         assert!(!reloaded_object_ids.contains(&ObjectInstanceId(501)));
         assert!(!reloaded_object_ids.contains(&ObjectInstanceId(1)));
 
-        let mut bridge_parts = app
+        let mut bridges = app
             .world_mut()
-            .query_filtered::<&Visibility, With<BridgePart>>();
-        let reloaded_bridge_parts: Vec<_> = bridge_parts.iter(app.world()).collect();
-        assert_eq!(reloaded_bridge_parts.len(), 3);
-        assert!(
-            reloaded_bridge_parts
-                .iter()
-                .all(|visibility| **visibility == Visibility::Visible)
-        );
+            .query_filtered::<&Visibility, With<Bridge>>();
+        let reloaded_bridges: Vec<_> = bridges.iter(app.world()).collect();
+        assert_eq!(reloaded_bridges.len(), 1);
+        assert_eq!(*reloaded_bridges[0], Visibility::Visible);
 
         assert!(!app.world().resource::<WorldMap>().blocks_movement(
             Vec3::new(5.8, 0.0, 0.0),
@@ -806,9 +1107,15 @@ mod tests {// テスト用のモジュール
     }
 
     fn press_key_and_update(app: &mut App, key: KeyCode) {
+        press_keys_and_update(app, &[key]);
+    }
+
+    fn press_keys_and_update(app: &mut App, keys: &[KeyCode]) {
         let mut keyboard = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
         keyboard.reset_all();
-        keyboard.press(key);
+        for key in keys {
+            keyboard.press(*key);
+        }
         drop(keyboard);
         app.update();
     }

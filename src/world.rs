@@ -64,11 +64,12 @@ pub enum TerrainKind {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ObjectInstanceId(pub u32);
 
+pub(crate) const BRIDGE_SITE_ID: ObjectInstanceId = ObjectInstanceId(1);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObjectKind {
     Log,
-    BridgeDeck,
-    BridgeRail,
+    Bridge,
     Tree,
     AxePickup,
 }
@@ -241,7 +242,10 @@ impl WorldMap {// ワールドマップの定義に関するメソッド群
                     errors.push(WorldMapValidationError::InvalidObjectRotation(object.id));
                 }
 
-                if !collider_is_valid(object.collider) {
+                if !collider_is_valid(object.collider)
+                    || (matches!(object.kind, ObjectKind::Log | ObjectKind::Bridge)
+                        && !matches!(object.collider, ColliderShape::Box { .. }))
+                {
                     errors.push(WorldMapValidationError::InvalidObjectCollider(object.id));
                 }
             }
@@ -295,7 +299,7 @@ impl WorldMap {// ワールドマップの定義に関するメソッド群
     }
 
     fn bridge_covers(&self, position: Vec3, actor_radius: f32) -> bool {
-        // 指定された座標が橋のパーツのコライダーの範囲内にあるかどうかを判定する
+        // 指定された座標が橋のコライダーの範囲内にあるかどうかを判定する
         let center = ChunkCoord::from_world_position(position);
         for z_offset in -1..=1 {
             for x_offset in -1..=1 {
@@ -310,7 +314,7 @@ impl WorldMap {// ワールドマップの定義に関するメソッド群
                 for bridge in chunk
                     .objects
                     .iter()
-                    .filter(|object| object.kind == ObjectKind::BridgeDeck)
+                    .filter(|object| object.kind == ObjectKind::Bridge)
                 {
                     let bridge_position = coord.world_position(bridge.local_position);
                     let delta = Vec3::new(
@@ -389,9 +393,9 @@ impl WorldMap {// ワールドマップの定義に関するメソッド群
                 completion_flag: None,
             },
             ObjectPlacement {
-                id: ObjectInstanceId(1),
+                id: BRIDGE_SITE_ID,
                 kind: ObjectKind::Log,
-                local_position: Vec3::new(-2.0, 0.18, -5.0),
+                local_position: Vec3::new(-2.0, 0.18, -4.0),
                 rotation: Quat::IDENTITY,
                 collider: ColliderShape::Box {
                     half_extents: Vec3::new(0.8, 0.18, 0.225),
@@ -400,31 +404,11 @@ impl WorldMap {// ワールドマップの定義に関するメソッド群
             },
             ObjectPlacement {
                 id: ObjectInstanceId(2),
-                kind: ObjectKind::BridgeDeck,
+                kind: ObjectKind::Bridge,
                 local_position: Vec3::new(0.8, 0.2, -5.0),
                 rotation: Quat::IDENTITY,
                 collider: ColliderShape::Box {
                     half_extents: Vec3::new(2.1, 0.11, 0.75),
-                },
-                completion_flag: None,
-            },
-            ObjectPlacement {
-                id: ObjectInstanceId(3),
-                kind: ObjectKind::BridgeRail,
-                local_position: Vec3::new(0.8, 0.55, -5.78),
-                rotation: Quat::IDENTITY,
-                collider: ColliderShape::Box {
-                    half_extents: Vec3::new(2.1, 0.25, 0.08),
-                },
-                completion_flag: None,
-            },
-            ObjectPlacement {
-                id: ObjectInstanceId(4),
-                kind: ObjectKind::BridgeRail,
-                local_position: Vec3::new(0.8, 0.55, -4.22),
-                rotation: Quat::IDENTITY,
-                collider: ColliderShape::Box {
-                    half_extents: Vec3::new(2.1, 0.25, 0.08),
                 },
                 completion_flag: None,
             },
@@ -571,6 +555,33 @@ mod tests {// テスト用のモジュール
                 .iter()
                 .any(|error| matches!(error, WorldMapValidationError::InvalidObjectCollider(_)))
         );
+    }
+
+    #[test]
+    fn validation_requires_box_colliders_for_bridge_and_build_site() {
+        let mut map = WorldMap::prototype();
+        let center = map
+            .chunks
+            .get_mut(&ChunkCoord { x: 10, z: 10 })
+            .expect("prototype map has its center chunk");
+        for object in &mut center.objects {
+            if matches!(object.kind, ObjectKind::Log | ObjectKind::Bridge) {
+                object.collider = ColliderShape::Cylinder {
+                    radius: 0.5,
+                    half_height: 0.5,
+                };
+            }
+        }
+
+        let errors = map
+            .validate()
+            .expect_err("bridge and build site require box colliders");
+        assert!(errors.contains(&WorldMapValidationError::InvalidObjectCollider(
+            ObjectInstanceId(1)
+        )));
+        assert!(errors.contains(&WorldMapValidationError::InvalidObjectCollider(
+            ObjectInstanceId(2)
+        )));
     }
 
     #[test]

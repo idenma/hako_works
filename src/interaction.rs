@@ -2,13 +2,18 @@ use bevy::prelude::*;
 
 use crate::inventory::{Inventory, ItemKind};
 use crate::player::Player;
+use crate::quest::{NotebookState, definition_for_site};
 use crate::scene::{
     FlagChanged, Interactable, InteractionAction, InteractionPopup, InteractionPrompt,
     ObjectCollider, ObjectEntity, WorldFlags, WorldProgress,
 };
-use crate::world::ObjectInstanceId;
+use crate::world::{ColliderShape, ObjectInstanceId};
 
 const INTERACTION_DISTANCE: f32 = 2.0;
+
+pub(crate) fn is_in_interaction_range(distance: f32, collider: ColliderShape) -> bool {
+    distance <= INTERACTION_DISTANCE + collider.horizontal_radius()
+}
 
 pub(crate) fn perform_interaction(// プレイヤーが対象とインタラクトする
     mut commands: Commands,
@@ -64,7 +69,10 @@ pub(crate) fn perform_interaction(// プレイヤーが対象とインタラク�
             commands.entity(entity).despawn();
         }
         InteractionAction::BuildBridge(flag) => {
-            if !inventory.is_selected(ItemKind::Wood) || !inventory.consume(ItemKind::Wood, 1) {
+            let quest = definition_for_site(object_id, flag);
+            if !inventory.is_selected(quest.selected_item_kind())
+                || !quest.consume_materials(&mut inventory)
+            {
                 return;
             }
             flags.set(flag, true);
@@ -84,6 +92,7 @@ pub(crate) fn update_interaction_prompt(// 対話プロンプトを更新する
         &ObjectCollider,
     )>,
     inventory: Res<Inventory>,
+    notebook: Res<NotebookState>,
     flags: Res<WorldFlags>,
     progress: Res<WorldProgress>,
     mut prompt: Query<(&mut Text, &mut Visibility), With<InteractionPrompt>>,
@@ -94,6 +103,10 @@ pub(crate) fn update_interaction_prompt(// 対話プロンプトを更新する
     let Ok((mut text, mut visibility)) = prompt.single_mut() else {
         return;
     };
+    if notebook.is_open() {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    }
 
     let target = nearest_guided_target(
         player_transform,
@@ -102,13 +115,13 @@ pub(crate) fn update_interaction_prompt(// 対話プロンプトを更新する
         &flags,
         &progress,
     );
-    if let Some((_, _, _, guidance)) = target {
-        text.0 = guidance;
-        *visibility = Visibility::Visible;
+    let (next_text, next_visibility) = if let Some((_, _, _, guidance)) = target {
+        (guidance, Visibility::Visible)
     } else {
-        text.0.clear();
-        *visibility = Visibility::Hidden;
-    }
+        (String::new(), Visibility::Hidden)
+    };
+    text.set_if_neq(Text::new(next_text));
+    visibility.set_if_neq(next_visibility);
 }
 
 fn nearest_available_target<'a>(// プレイヤーに最も近い利用可能な対象を見つける
@@ -131,7 +144,7 @@ fn nearest_available_target<'a>(// プレイヤーに最も近い利用可能な
             let distance = player_transform.translation.distance(transform.translation);
             let available =
                 can_perform_action(interactable.action, object.0, inventory, flags, progress);
-            (distance <= INTERACTION_DISTANCE + collider.0.horizontal_radius() && available)
+            (is_in_interaction_range(distance, collider.0) && available)
                 .then_some((distance, object.0, entity, interactable.action))
         })
         .min_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)))
@@ -159,7 +172,7 @@ fn nearest_guided_target<'a>(//
                 interaction_guidance(interactable.action, object.0, inventory, flags, progress)?;
             let available =
                 can_perform_action(interactable.action, object.0, inventory, flags, progress);
-            (distance <= INTERACTION_DISTANCE + collider.0.horizontal_radius())
+            is_in_interaction_range(distance, collider.0)
                 .then_some((distance, object.0, entity, guidance, available))
         })
         .min_by(|left, right| {
@@ -192,19 +205,28 @@ fn interaction_guidance(// 対話ガイダンスを生成する
             "1 おのを えらぼう".to_owned()
         }
         InteractionAction::ChopTree => "木を切る  [E]".to_owned(),
-        InteractionAction::BuildBridge(_) if !inventory.has(ItemKind::Wood) => {
-            if inventory.has(ItemKind::Axe) && inventory.is_selected(ItemKind::Axe) {
-                "木を切って 木ざいを とろう".to_owned()
-            } else if inventory.has(ItemKind::Axe) {
-                "1 おのを えらんで 木を切ろう".to_owned()
+        InteractionAction::BuildBridge(flag) => {
+            let quest = definition_for_site(object_id, flag);
+            if let Some(missing) = quest.missing_material(inventory) {
+                if missing.item_kind() != ItemKind::Wood {
+                    format!("{}を あつめよう", missing.item_kind().label())
+                } else if inventory.has(ItemKind::Axe) && inventory.is_selected(ItemKind::Axe) {
+                    "木を切って 木ざいを とろう".to_owned()
+                } else if inventory.has(ItemKind::Axe) {
+                    "1 おのを えらんで 木を切ろう".to_owned()
+                } else {
+                    "まず おのを さがそう".to_owned()
+                }
+            } else if !inventory.is_selected(quest.selected_item_kind()) {
+                if quest.selected_item_kind() == ItemKind::Wood {
+                    "2 木ざいを えらぼう".to_owned()
+                } else {
+                    format!("{}を えらぼう", quest.selected_item_kind().label())
+                }
             } else {
-                "まず おのを さがそう".to_owned()
+                "橋を作る  [E]".to_owned()
             }
         }
-        InteractionAction::BuildBridge(_) if !inventory.is_selected(ItemKind::Wood) => {
-            "2 木ざいを えらぼう".to_owned()
-        }
-        InteractionAction::BuildBridge(_) => "橋を作る  [E]".to_owned(),
     })
 }
 
@@ -237,8 +259,10 @@ pub(crate) fn can_perform_action(// 対話アクションを実行できるか�
         InteractionAction::ChopTree => {
             inventory.is_selected(ItemKind::Axe) && inventory.has(ItemKind::Axe)
         }
-        InteractionAction::BuildBridge(_) => {
-            inventory.is_selected(ItemKind::Wood) && inventory.has(ItemKind::Wood)
+        InteractionAction::BuildBridge(flag) => {
+            let quest = definition_for_site(object_id, flag);
+            inventory.is_selected(quest.selected_item_kind())
+                && quest.materials_available(inventory)
         }
     }
 }
@@ -248,9 +272,16 @@ pub(crate) fn update_interaction_popups(
     players: Query<&Transform, With<Player>>,
     interactables: Query<(&Transform, &Interactable, &ObjectEntity, &ObjectCollider)>,
     mut popups: Query<(&ChildOf, &mut Visibility), With<InteractionPopup>>,
+    notebook: Res<NotebookState>,
     flags: Res<WorldFlags>,
     progress: Res<WorldProgress>,
 ) {
+    if notebook.is_open() {
+        for (_, mut visibility) in &mut popups {
+            visibility.set_if_neq(Visibility::Hidden);
+        }
+        return;
+    }
     let Ok(player_transform) = players.single() else {
         return;
     };
@@ -260,17 +291,19 @@ pub(crate) fn update_interaction_popups(
             |(target, interactable, object, collider)| {
                 let available =
                     !action_is_complete(interactable.action, object.0, &flags, &progress);
-                player_transform.translation.distance(target.translation)
-                    <= INTERACTION_DISTANCE + collider.0.horizontal_radius()
+                is_in_interaction_range(
+                    player_transform.translation.distance(target.translation),
+                    collider.0,
+                )
                     && available
             },
         );
 
-        *visibility = if is_near {
+        visibility.set_if_neq(if is_near {
             Visibility::Visible
         } else {
             Visibility::Hidden
-        };
+        });
     }
 }
 

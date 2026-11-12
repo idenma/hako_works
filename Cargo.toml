@@ -39,7 +39,7 @@ unsafe_op_in_unsafe_fn = "warn"
 unused_qualifications = "warn"
 
 [dependencies]
-bevy = "=0.20.0"
+bevy = { version = "=0.20.0", features = ["complex_script_segmentation"] }
 ron = "0.12.3"
 serde = { version = "1.0.229", features = ["derive"] }
 

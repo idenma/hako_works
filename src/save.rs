@@ -5,13 +5,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::inventory::{Inventory, ItemId, ItemKind};
+use crate::quest::{self, BRIDGE_QUEST_ID, QuestId, QuestLog};
 use crate::scene::{WorldFlags, WorldProgress};
 use crate::world::{ObjectInstanceId, ObjectKind, WorldFlag, WorldMap};
 
-const SAVE_VERSION: u32 = 1;
+const SAVE_VERSION: u32 = 2;
+const LEGACY_SAVE_VERSION: u32 = 1;
 const SAVE_FILE_NAME: &str = "progress.ron";
 
 #[derive(Serialize, Deserialize)]
@@ -22,6 +24,28 @@ struct SaveData {
     bridge_built: bool,
     collected_object_ids: Vec<u32>,
     chopped_tree_ids: Vec<u32>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_quest_ids",
+        serialize_with = "serialize_quest_ids"
+    )]
+    started_quest_ids: Option<Vec<u16>>,
+}
+
+fn deserialize_quest_ids<'de, D>(deserializer: D) -> Result<Option<Vec<u16>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<u16>::deserialize(deserializer).map(Some)
+}
+
+fn serialize_quest_ids<S>(ids: &Option<Vec<u16>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    ids.as_ref()
+        .ok_or_else(|| serde::ser::Error::custom("開始済みクエストIDがありません"))?
+        .serialize(serializer)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,6 +58,7 @@ pub(crate) struct LoadedGame {
     pub(crate) inventory: Inventory,
     pub(crate) flags: WorldFlags,
     pub(crate) progress: WorldProgress,
+    pub(crate) quests: QuestLog,
 }
 
 #[derive(Resource)]
@@ -70,12 +95,13 @@ pub(crate) fn save_on_exit(
     inventory: Res<Inventory>,
     flags: Res<WorldFlags>,
     progress: Res<WorldProgress>,
+    quests: Res<QuestLog>,
 ) {
     if exits.read().next().is_none() {
         return;
     }
 
-    if let Err(error) = save_game_to_path(&save_file.0, &inventory, &flags, &progress) {
+    if let Err(error) = save_game_to_path(&save_file.0, &inventory, &flags, &progress, &quests) {
         error!("セーブデータを保存できませんでした: {error}");
     }
 }
@@ -85,6 +111,7 @@ fn save_game_to_path(
     inventory: &Inventory,
     flags: &WorldFlags,
     progress: &WorldProgress,
+    quests: &QuestLog,
 ) -> Result<(), String> {
     let parent = path
         .parent()
@@ -92,7 +119,7 @@ fn save_game_to_path(
     fs::create_dir_all(parent)
         .map_err(|error| format!("{} を作成できません: {error}", parent.display()))?;
 
-    let data = save_data_from_game(inventory, flags, progress);
+    let data = save_data_from_game(inventory, flags, progress, quests);
     let contents =
         ron::to_string(&data).map_err(|error| format!("保存データを作れません: {error}"))?;
     let temporary_path = path.with_extension("ron.tmp");
@@ -157,6 +184,7 @@ fn default_game() -> LoadedGame {
         inventory: Inventory::default(),
         flags: WorldFlags::default(),
         progress: WorldProgress::default(),
+        quests: QuestLog::default(),
     }
 }
 
@@ -164,7 +192,10 @@ fn save_data_from_game(
     inventory: &Inventory,
     flags: &WorldFlags,
     progress: &WorldProgress,
+    quests: &QuestLog,
 ) -> SaveData {
+    let mut started_quest_ids: Vec<_> = quests.started_ids().map(|id| id.0).collect();
+    started_quest_ids.sort_unstable();
     SaveData {
         version: SAVE_VERSION,
         items: inventory
@@ -180,14 +211,15 @@ fn save_data_from_game(
         bridge_built: flags.is_set(WorldFlag::BridgeBuilt),
         collected_object_ids: progress.collected_objects.iter().map(|id| id.0).collect(),
         chopped_tree_ids: progress.chopped_trees.iter().map(|id| id.0).collect(),
+        started_quest_ids: Some(started_quest_ids),
     }
 }
 
 fn game_from_save_data(data: SaveData, world_map: &WorldMap) -> Result<LoadedGame, String> {
-    if data.version != SAVE_VERSION {
+    if data.version != LEGACY_SAVE_VERSION && data.version != SAVE_VERSION {
         return Err(format!(
-            "未対応の保存形式バージョンです: {} (対応: {SAVE_VERSION})",
-            data.version
+            "未対応の保存形式バージョンです: {} (対応: {LEGACY_SAVE_VERSION}, {SAVE_VERSION})",
+            data.version,
         ));
     }
 
@@ -256,6 +288,25 @@ fn game_from_save_data(data: SaveData, world_map: &WorldMap) -> Result<LoadedGam
     let mut flags = WorldFlags::default();
     flags.set(WorldFlag::BridgeBuilt, data.bridge_built);
 
+    let started_quest_ids = match data.started_quest_ids {
+        Some(ids) => ids,
+        None if data.version == LEGACY_SAVE_VERSION => Vec::new(),
+        None => return Err("保存データに開始済みクエストIDがありません".to_owned()),
+    };
+    let mut quests = QuestLog::default();
+    for raw_id in started_quest_ids {
+        let id = QuestId(raw_id);
+        if quest::definition(id).is_none() {
+            return Err(format!("未知のクエストIDです: {raw_id}"));
+        }
+        if !quests.start(id) {
+            return Err(format!("クエストIDが重複しています: {raw_id}"));
+        }
+    }
+    if data.version == LEGACY_SAVE_VERSION && data.bridge_built {
+        quests.start(BRIDGE_QUEST_ID);
+    }
+
     Ok(LoadedGame {
         inventory,
         flags,
@@ -263,6 +314,7 @@ fn game_from_save_data(data: SaveData, world_map: &WorldMap) -> Result<LoadedGam
             collected_objects,
             chopped_trees,
         },
+        quests,
     })
 }
 
@@ -305,8 +357,11 @@ mod tests {
             collected_objects: HashSet::from([ObjectInstanceId(500)]),
             chopped_trees: HashSet::from([ObjectInstanceId(501)]),
         };
-        let data = save_data_from_game(&inventory, &flags, &progress);
+        let mut quests = QuestLog::default();
+        quests.start(BRIDGE_QUEST_ID);
+        let data = save_data_from_game(&inventory, &flags, &progress, &quests);
         let encoded = ron::to_string(&data).expect("save data serializes");
+        assert!(encoded.contains("started_quest_ids:[1]"));
         let decoded = ron::from_str(&encoded).expect("save data deserializes");
         let loaded = game_from_save_data(decoded, &WorldMap::prototype())
             .expect("valid saved progress loads");
@@ -315,6 +370,7 @@ mod tests {
         assert_eq!(loaded.inventory.count(ItemKind::Wood), 2);
         assert!(loaded.inventory.is_selected(ItemKind::Wood));
         assert!(loaded.flags.is_set(WorldFlag::BridgeBuilt));
+        assert!(loaded.quests.has_started(BRIDGE_QUEST_ID));
         assert!(loaded
             .progress
             .collected_objects
@@ -332,6 +388,7 @@ mod tests {
             &Inventory::default(),
             &WorldFlags::default(),
             &WorldProgress::default(),
+            &QuestLog::default(),
         );
         data.items.push(SavedItem { id: 999, count: 1 });
         assert!(game_from_save_data(data, &world_map).is_err());
@@ -340,6 +397,7 @@ mod tests {
             &Inventory::default(),
             &WorldFlags::default(),
             &WorldProgress::default(),
+            &QuestLog::default(),
         );
         data.chopped_tree_ids.push(500);
         assert!(game_from_save_data(data, &world_map).is_err());
@@ -352,6 +410,7 @@ mod tests {
             &Inventory::default(),
             &WorldFlags::default(),
             &WorldProgress::default(),
+            &QuestLog::default(),
         );
         data.chopped_tree_ids.push(11_606);
 
@@ -370,6 +429,7 @@ mod tests {
             &Inventory::default(),
             &WorldFlags::default(),
             &WorldProgress::default(),
+            &QuestLog::default(),
         );
         data.items.push(SavedItem { id: 2, count: 0 });
         data.selected_item_id = Some(2);
@@ -379,7 +439,12 @@ mod tests {
         assert_eq!(loaded.inventory.count(ItemKind::Wood), 0);
         assert_eq!(loaded.inventory.selected, None);
 
-        let data = save_data_from_game(&loaded.inventory, &loaded.flags, &loaded.progress);
+        let data = save_data_from_game(
+            &loaded.inventory,
+            &loaded.flags,
+            &loaded.progress,
+            &loaded.quests,
+        );
         assert!(data.items.is_empty());
         assert_eq!(data.selected_item_id, None);
     }
@@ -390,9 +455,96 @@ mod tests {
             &Inventory::default(),
             &WorldFlags::default(),
             &WorldProgress::default(),
+            &QuestLog::default(),
         );
         data.version += 1;
         assert!(game_from_save_data(data, &WorldMap::prototype()).is_err());
+    }
+
+    #[test]
+    fn legacy_completed_bridge_migrates_to_a_completed_quest() {
+        let contents = "(version:1,items:[(id:1,count:1)],selected_item_id:Some(1),\
+            bridge_built:true,collected_object_ids:[500],chopped_tree_ids:[501])";
+        let data: SaveData = ron::from_str(contents).expect("version 1 save is readable");
+        let loaded = game_from_save_data(data, &WorldMap::prototype())
+            .expect("version 1 progress is migrated");
+        assert_eq!(loaded.inventory.count(ItemKind::Axe), 1);
+        assert!(loaded.flags.is_set(WorldFlag::BridgeBuilt));
+        assert!(loaded.quests.has_started(BRIDGE_QUEST_ID));
+        assert!(loaded.progress.chopped_trees.contains(&ObjectInstanceId(501)));
+
+        let saved = save_data_from_game(
+            &loaded.inventory,
+            &loaded.flags,
+            &loaded.progress,
+            &loaded.quests,
+        );
+        assert_eq!(saved.version, SAVE_VERSION);
+        assert_eq!(saved.started_quest_ids, Some(vec![BRIDGE_QUEST_ID.0]));
+    }
+
+    #[test]
+    fn legacy_unfinished_game_keeps_its_materials() {
+        let contents = "(version:1,items:[(id:2,count:1)],selected_item_id:Some(2),\
+            bridge_built:false,collected_object_ids:[],chopped_tree_ids:[501])";
+        let data: SaveData = ron::from_str(contents).expect("version 1 save is readable");
+        let loaded = game_from_save_data(data, &WorldMap::prototype())
+            .expect("unfinished version 1 progress is migrated");
+        assert_eq!(loaded.inventory.count(ItemKind::Wood), 1);
+        assert!(loaded.inventory.is_selected(ItemKind::Wood));
+        assert!(!loaded.flags.is_set(WorldFlag::BridgeBuilt));
+        assert!(!loaded.quests.has_started(BRIDGE_QUEST_ID));
+    }
+
+    #[test]
+    fn unfinished_quest_and_its_materials_round_trip() {
+        let mut inventory = Inventory::default();
+        inventory.add(ItemKind::Axe, 1);
+        inventory.add(ItemKind::Wood, 1);
+        inventory.select(ItemKind::Wood);
+        let mut quests = QuestLog::default();
+        quests.start(BRIDGE_QUEST_ID);
+        let data = save_data_from_game(
+            &inventory,
+            &WorldFlags::default(),
+            &WorldProgress::default(),
+            &quests,
+        );
+        let encoded = ron::to_string(&data).expect("save data serializes");
+        let decoded = ron::from_str(&encoded).expect("save data deserializes");
+        let loaded = game_from_save_data(decoded, &WorldMap::prototype())
+            .expect("unfinished quest is restored");
+        assert!(loaded.quests.has_started(BRIDGE_QUEST_ID));
+        assert!(!loaded.flags.is_set(WorldFlag::BridgeBuilt));
+        assert_eq!(loaded.inventory.count(ItemKind::Axe), 1);
+        assert_eq!(loaded.inventory.count(ItemKind::Wood), 1);
+        assert!(loaded.inventory.is_selected(ItemKind::Wood));
+    }
+
+    #[test]
+    fn unknown_and_duplicate_saved_quest_ids_are_rejected() {
+        let world_map = WorldMap::prototype();
+        for ids in [vec![999], vec![BRIDGE_QUEST_ID.0, BRIDGE_QUEST_ID.0]] {
+            let mut data = save_data_from_game(
+                &Inventory::default(),
+                &WorldFlags::default(),
+                &WorldProgress::default(),
+                &QuestLog::default(),
+            );
+            data.started_quest_ids = Some(ids);
+            assert!(game_from_save_data(data, &world_map).is_err());
+        }
+    }
+
+    #[test]
+    fn current_save_without_quest_ids_is_rejected() {
+        let contents = "(version:2,items:[],selected_item_id:None,bridge_built:false,\
+            collected_object_ids:[],chopped_tree_ids:[])";
+        let data: SaveData = ron::from_str(contents).expect("save fields deserialize");
+        let error = game_from_save_data(data, &WorldMap::prototype())
+            .err()
+            .expect("version 2 requires quest IDs");
+        assert!(error.contains("クエストID"));
     }
 
     #[test]
@@ -421,12 +573,16 @@ mod tests {
             collected_objects: HashSet::from([ObjectInstanceId(500)]),
             chopped_trees: HashSet::from([ObjectInstanceId(501)]),
         };
-        save_game_to_path(&path, &inventory, &flags, &progress).expect("save file is written");
+        let mut quests = QuestLog::default();
+        quests.start(BRIDGE_QUEST_ID);
+        save_game_to_path(&path, &inventory, &flags, &progress, &quests)
+            .expect("save file is written");
 
         let loaded = load_game(&world_map, &save_file).expect("save file is restored");
         assert_eq!(loaded.inventory.count(ItemKind::Axe), 1);
         assert_eq!(loaded.inventory.count(ItemKind::Wood), 2);
         assert!(loaded.flags.is_set(WorldFlag::BridgeBuilt));
+        assert!(loaded.quests.has_started(BRIDGE_QUEST_ID));
         assert!(loaded
             .progress
             .collected_objects
@@ -456,11 +612,15 @@ mod tests {
             .init_resource::<Inventory>()
             .init_resource::<WorldFlags>()
             .init_resource::<WorldProgress>()
+            .init_resource::<QuestLog>()
             .add_systems(Update, request_app_exit)
             .add_systems(Last, save_on_exit.in_set(OnAppExitSystems));
         app.world_mut()
             .resource_mut::<Inventory>()
             .add(ItemKind::Axe, 1);
+        app.world_mut()
+            .resource_mut::<QuestLog>()
+            .start(BRIDGE_QUEST_ID);
 
         app.update();
 
@@ -468,6 +628,7 @@ mod tests {
         let loaded = load_game(&WorldMap::prototype(), &SaveFilePath(path.clone()))
             .expect("exit save can be loaded");
         assert_eq!(loaded.inventory.count(ItemKind::Axe), 1);
+        assert!(loaded.quests.has_started(BRIDGE_QUEST_ID));
         fs::remove_dir_all(directory).expect("test save directory is removed");
     }
 

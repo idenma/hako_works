@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
+use crate::quest::NotebookState;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ItemKind {
     Axe,
@@ -99,24 +101,39 @@ pub(crate) struct InventoryHud;
 
 pub(crate) fn select_inventory_item(// インベントリのアイテムを選択する
     keyboard: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     mut inventory: ResMut<Inventory>,
 ) {
-    if keyboard.just_pressed(KeyCode::Digit1) {
+    if keyboard.just_pressed(KeyCode::Digit1)
+        || gamepads
+            .iter()
+            .any(|gamepad| gamepad.just_pressed(GamepadButton::DPadLeft))
+    {
         inventory.select(ItemKind::Axe);
     }
-    if keyboard.just_pressed(KeyCode::Digit2) {
+    if keyboard.just_pressed(KeyCode::Digit2)
+        || gamepads
+            .iter()
+            .any(|gamepad| gamepad.just_pressed(GamepadButton::DPadRight))
+    {
         inventory.select(ItemKind::Wood);
     }
 }
 
 pub(crate) fn update_inventory_hud(// インベントリHUDを更新する
     inventory: Res<Inventory>,
-    mut hud: Query<&mut Text, With<InventoryHud>>,
+    notebook: Res<NotebookState>,
+    mut hud: Query<(&mut Text, &mut Visibility), With<InventoryHud>>,
 ) {
-    let Ok(mut text) = hud.single_mut() else {
+    let Ok((mut text, mut visibility)) = hud.single_mut() else {
         return;
     };
 
+    visibility.set_if_neq(if notebook.is_open() {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
+    });
     let axe_marker = if inventory.is_selected(ItemKind::Axe) {
         ">"
     } else {
@@ -127,13 +144,13 @@ pub(crate) fn update_inventory_hud(// インベントリHUDを更新する
     } else {
         " "
     };
-    text.0 = format!(
-        "もちもの\n{axe_marker}1 {}  {}\n{wood_marker}2 {} {}\n1/2 えらぶ",
+    text.set_if_neq(Text::new(format!(
+        "もちもの\n{axe_marker}1 {}  {}\n{wood_marker}2 {} {}\n1/2 または パッド←/→",
         ItemKind::Axe.label(),
         inventory.count(ItemKind::Axe),
         ItemKind::Wood.label(),
         inventory.count(ItemKind::Wood),
-    );
+    )));
 }
 
 #[cfg(test)]
@@ -148,5 +165,36 @@ mod tests {
         assert_eq!(ItemKind::from_id(ItemId(2)), Some(ItemKind::Wood));
         assert_eq!(ItemKind::from_id(ItemId(0)), None);
         assert_ne!(ItemKind::Axe.id(), ItemKind::Wood.id());
+    }
+
+    #[test]
+    fn gamepad_dpad_selects_owned_items() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Inventory>()
+            .add_systems(Update, select_inventory_item);
+        {
+            let mut inventory = app.world_mut().resource_mut::<Inventory>();
+            inventory.add(ItemKind::Axe, 1);
+            inventory.add(ItemKind::Wood, 1);
+        }
+        let gamepad = app.world_mut().spawn(Gamepad::default()).id();
+        app.world_mut()
+            .get_mut::<Gamepad>(gamepad)
+            .expect("gamepad exists")
+            .digital_mut()
+            .press(GamepadButton::DPadRight);
+        app.update();
+        assert!(app.world().resource::<Inventory>().is_selected(ItemKind::Wood));
+
+        let mut input = app
+            .world_mut()
+            .get_mut::<Gamepad>(gamepad)
+            .expect("gamepad exists");
+        input.digital_mut().reset_all();
+        input.digital_mut().press(GamepadButton::DPadLeft);
+        drop(input);
+        app.update();
+        assert!(app.world().resource::<Inventory>().is_selected(ItemKind::Axe));
     }
 }

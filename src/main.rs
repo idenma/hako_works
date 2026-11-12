@@ -3,6 +3,7 @@
 mod interaction;
 mod inventory;
 mod player;
+mod quest;
 mod save;
 mod scene;
 mod world;
@@ -15,12 +16,14 @@ use world::WorldMap;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum UpdateSet {
+    NotebookInput,
     Player,
     InventorySelection,
     ChunkStreaming,
     InteractionActions,
     WorldFeedback,
     Npc,
+    QuestProgress,
     Hud,
 }
 
@@ -34,6 +37,9 @@ fn main() {
             .join("\n");
         panic!("ワールドマップ定義が不正です:\n{details}");
     }
+    if let Err(errors) = quest::validate_definitions(&world_map) {
+        panic!("クエスト定義が不正です:\n{}", errors.join("\n"));
+    }
     let save_file = save::default_save_path()
         .unwrap_or_else(|error| panic!("セーブデータ保存先を決定できませんでした: {error}"));
     let loaded_game = save::load_game(&world_map, &save_file)
@@ -46,36 +52,52 @@ fn main() {
         .insert_resource(loaded_game.flags)
         .insert_resource(loaded_game.progress)
         .insert_resource(loaded_game.inventory)
+        .insert_resource(loaded_game.quests)
         .init_resource::<player::CameraOrbit>()
+        .init_resource::<quest::NotebookState>()
         .add_message::<scene::FlagChanged>()
         .add_systems(
             Startup,
-            (scene::setup_scene, scene::validate_required_entities).chain(),
+            (
+                scene::setup_scene,
+                quest::setup_notebook,
+                scene::validate_required_entities,
+            )
+                .chain(),
         )
         .add_systems(Last, save::save_on_exit.in_set(OnAppExitSystems))
         .add_systems(Update, scene::log_asset_load_failures)
         .configure_sets(
             Update,
             (
+                UpdateSet::NotebookInput,
                 UpdateSet::Player,
                 UpdateSet::InventorySelection,
                 UpdateSet::ChunkStreaming,
                 UpdateSet::InteractionActions,
                 UpdateSet::WorldFeedback,
                 UpdateSet::Npc,
+                UpdateSet::QuestProgress,
                 UpdateSet::Hud,
             )
                 .chain(),
         )
         .add_systems(
             Update,
+            quest::toggle_notebook.in_set(UpdateSet::NotebookInput),
+        )
+        .add_systems(
+            Update,
             (orbit_camera, move_player)
                 .chain()
+                .run_if(quest::gameplay_enabled)
                 .in_set(UpdateSet::Player),
         )
         .add_systems(
             Update,
-            inventory::select_inventory_item.in_set(UpdateSet::InventorySelection),
+            inventory::select_inventory_item
+                .run_if(quest::gameplay_enabled)
+                .in_set(UpdateSet::InventorySelection),
         )
         .add_systems(
             Update,
@@ -84,7 +106,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                perform_interaction,
+                perform_interaction.run_if(quest::gameplay_enabled),
                 update_interaction_prompt,
                 update_interaction_popups,
             )
@@ -98,7 +120,12 @@ fn main() {
         .add_systems(Update, scene::update_riverside_npc.in_set(UpdateSet::Npc))
         .add_systems(
             Update,
-            inventory::update_inventory_hud.in_set(UpdateSet::Hud),
+            quest::update_quests.in_set(UpdateSet::QuestProgress),
+        )
+        .add_systems(
+            Update,
+            (inventory::update_inventory_hud, quest::update_notebook_ui)
+                .in_set(UpdateSet::Hud),
         )
         .run();
 }

@@ -65,6 +65,8 @@ pub enum TerrainKind {
 pub struct ObjectInstanceId(pub u32);
 
 pub(crate) const BRIDGE_SITE_ID: ObjectInstanceId = ObjectInstanceId(1);
+pub(crate) const HOUSE_BUILDER_NPC_ID: ObjectInstanceId = ObjectInstanceId(600);
+pub(crate) const HOUSE_OBJECT_ID: ObjectInstanceId = ObjectInstanceId(601);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObjectKind {
@@ -72,6 +74,8 @@ pub enum ObjectKind {
     Bridge,
     Tree,
     AxePickup,
+    HouseBuilderNpc,
+    House,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -94,6 +98,7 @@ impl ColliderShape {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum WorldFlag {
     BridgeBuilt,
+    HouseBuilt,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -107,13 +112,15 @@ pub struct ObjectPlacement {
 }
 
 #[derive(Debug)]
-pub struct ChunkDefinition {// チャンクの定義
+pub struct ChunkDefinition {
+    // チャンクの定義
     pub terrain: TerrainKind,
     pub objects: Vec<ObjectPlacement>,
 }
 
 #[derive(Resource)]
-pub struct WorldMap {// ワールドマップの定義
+pub struct WorldMap {
+    // ワールドマップの定義
     pub chunks: HashMap<ChunkCoord, ChunkDefinition>,
 }
 
@@ -193,7 +200,8 @@ impl fmt::Display for WorldMapValidationError {
 
 impl std::error::Error for WorldMapValidationError {}
 
-impl WorldMap {// ワールドマップの定義に関するメソッド群
+impl WorldMap {
+    // ワールドマップの定義に関するメソッド群
     pub fn validate(&self) -> Result<(), Vec<WorldMapValidationError>> {
         let mut errors = Vec::new();
         let mut object_ids = HashSet::new();
@@ -245,6 +253,9 @@ impl WorldMap {// ワールドマップの定義に関するメソッド群
                 if !collider_is_valid(object.collider)
                     || (matches!(object.kind, ObjectKind::Log | ObjectKind::Bridge)
                         && !matches!(object.collider, ColliderShape::Box { .. }))
+                    || (object.kind == ObjectKind::House && object.completion_flag.is_none())
+                    || (object.kind == ObjectKind::HouseBuilderNpc
+                        && object.completion_flag.is_some())
                 {
                     errors.push(WorldMapValidationError::InvalidObjectCollider(object.id));
                 }
@@ -336,7 +347,8 @@ impl WorldMap {// ワールドマップの定義に関するメソッド群
         false
     }
 
-    pub fn prototype() -> Self {// ワールドマップのプロトタイプを生成する
+    pub fn prototype() -> Self {
+        // ワールドマップのプロトタイプを生成する
         let mut chunks =
             HashMap::with_capacity((WORLD_CHUNKS_PER_AXIS * WORLD_CHUNKS_PER_AXIS) as usize);
 
@@ -412,6 +424,17 @@ impl WorldMap {// ワールドマップの定義に関するメソッド群
                 },
                 completion_flag: None,
             },
+            ObjectPlacement {
+                id: HOUSE_BUILDER_NPC_ID,
+                kind: ObjectKind::HouseBuilderNpc,
+                local_position: Vec3::new(4.2, 0.0, -2.5),
+                rotation: Quat::IDENTITY,
+                collider: ColliderShape::Cylinder {
+                    radius: 0.55,
+                    half_height: 1.0,
+                },
+                completion_flag: None,
+            },
         ]);
         assert!(center.objects.len() <= MAX_OBJECTS_PER_CHUNK);
 
@@ -430,7 +453,47 @@ impl WorldMap {// ワールドマップの定義に関するメソッド群
             completion_flag: None,
         });
 
+        let eastern_trees = chunks
+            .get_mut(&ChunkCoord { x: 11, z: 9 })
+            .expect("the prototype map contains the eastern riverbank");
+        eastern_trees.objects.extend([
+            prototype_placed_tree(ObjectInstanceId(502), Vec3::new(-4.2, 0.0, -1.0)),
+            prototype_placed_tree(ObjectInstanceId(503), Vec3::new(-4.2, 0.0, 2.0)),
+        ]);
+        let eastern_house_lot = chunks
+            .get_mut(&ChunkCoord { x: 11, z: 10 })
+            .expect("the prototype map contains the house lot");
+        eastern_house_lot.objects.extend([
+            prototype_placed_tree(ObjectInstanceId(504), Vec3::new(-4.2, 0.0, 1.0)),
+            prototype_placed_tree(ObjectInstanceId(505), Vec3::new(-4.2, 0.0, 4.0)),
+        ]);
+
+        eastern_house_lot.objects.push(ObjectPlacement {
+            id: HOUSE_OBJECT_ID,
+            kind: ObjectKind::House,
+            local_position: Vec3::new(-2.0, 0.0, -1.5),
+            rotation: Quat::IDENTITY,
+            collider: ColliderShape::Box {
+                half_extents: Vec3::new(1.7, 1.8, 1.5),
+            },
+            completion_flag: Some(WorldFlag::HouseBuilt),
+        });
+
         Self { chunks }
+    }
+}
+
+fn prototype_placed_tree(id: ObjectInstanceId, local_position: Vec3) -> ObjectPlacement {
+    ObjectPlacement {
+        id,
+        kind: ObjectKind::Tree,
+        local_position,
+        rotation: Quat::IDENTITY,
+        collider: ColliderShape::Cylinder {
+            radius: 0.4,
+            half_height: 1.5,
+        },
+        completion_flag: None,
     }
 }
 
@@ -464,7 +527,8 @@ fn collider_is_valid(collider: ColliderShape) -> bool {
 }
 
 #[cfg(test)]
-mod tests {// テスト用のモジュール
+mod tests {
+    // テスト用のモジュール
     use super::*;
 
     #[test]
@@ -482,8 +546,7 @@ mod tests {// テスト用のモジュール
     fn gentle_slope_rises_smoothly_and_returns_to_flat_ground() {
         let map = WorldMap::prototype();
         let center_height = map.ground_height(HILL_CENTER_X, HILL_CENTER_Z);
-        let halfway_height =
-            map.ground_height(HILL_CENTER_X + HILL_RADIUS / 2.0, HILL_CENTER_Z);
+        let halfway_height = map.ground_height(HILL_CENTER_X + HILL_RADIUS / 2.0, HILL_CENTER_Z);
 
         assert_eq!(center_height, HILL_HEIGHT);
         assert!((halfway_height - HILL_HEIGHT / 2.0).abs() < 0.001);
@@ -576,12 +639,16 @@ mod tests {// テスト用のモジュール
         let errors = map
             .validate()
             .expect_err("bridge and build site require box colliders");
-        assert!(errors.contains(&WorldMapValidationError::InvalidObjectCollider(
-            ObjectInstanceId(1)
-        )));
-        assert!(errors.contains(&WorldMapValidationError::InvalidObjectCollider(
-            ObjectInstanceId(2)
-        )));
+        assert!(
+            errors.contains(&WorldMapValidationError::InvalidObjectCollider(
+                ObjectInstanceId(1)
+            ))
+        );
+        assert!(
+            errors.contains(&WorldMapValidationError::InvalidObjectCollider(
+                ObjectInstanceId(2)
+            ))
+        );
     }
 
     #[test]
@@ -724,11 +791,17 @@ mod tests {// テスト用のモジュール
 
         assert!(!trees.is_empty());
         assert!(trees.len() < 100);
-        assert!(trees.iter().all(|(chunk, object)| chunk.terrain != TerrainKind::RiverChannel
-            && matches!(object.collider, ColliderShape::Cylinder { .. })));
-        assert!(trees
-            .iter()
-            .any(|(_, object)| object.id == ObjectInstanceId(11_606)));
+        assert!(
+            trees
+                .iter()
+                .all(|(chunk, object)| chunk.terrain != TerrainKind::RiverChannel
+                    && matches!(object.collider, ColliderShape::Cylinder { .. }))
+        );
+        assert!(
+            trees
+                .iter()
+                .any(|(_, object)| object.id == ObjectInstanceId(11_606))
+        );
     }
 
     #[test]

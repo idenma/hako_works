@@ -11,7 +11,9 @@ use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use crate::inventory::{InventoryHud, ItemKind};
 use crate::player::{FollowCamera, PLAYER_GROUND_Y, Player};
-use crate::quest::{NotebookPage, NotebookState, QuestHint};
+use crate::quest::{
+    BRIDGE_QUEST_ID, HOUSE_QUEST_ID, NotebookPage, NotebookState, QuestGiver, QuestHint, QuestId,
+};
 use crate::world::{
     CHUNK_SIZE, ChunkCoord, ChunkDefinition, ColliderShape, ObjectInstanceId, ObjectKind,
     ObjectPlacement, RIVER_CHANNEL_CENTER_X_OFFSET, RIVER_CHANNEL_SURFACE_THICKNESS,
@@ -34,7 +36,7 @@ pub(crate) struct Interactable {
 pub(crate) enum InteractionAction {
     PickUp(ItemKind),
     ChopTree,
-    BuildBridge(WorldFlag),
+    BuildQuest(QuestId),
 }
 
 #[derive(Component)]
@@ -45,6 +47,9 @@ pub(crate) struct InteractionPrompt;
 
 #[derive(Component)]
 pub(crate) struct Bridge;
+
+#[derive(Component)]
+pub(crate) struct House;
 
 #[derive(Component)]
 pub(crate) struct ChunkEntity(ChunkCoord);
@@ -62,6 +67,9 @@ struct RiverChannel;
 pub(crate) struct RiversideNpc;
 
 #[derive(Component)]
+pub(crate) struct HouseBuilderNpc;
+
+#[derive(Component)]
 pub(crate) struct NpcDialogueHud;
 
 #[derive(Resource)]
@@ -70,6 +78,10 @@ pub(crate) struct WorldRenderAssets {
     river_mesh: Handle<Mesh>,
     popup_mesh: Handle<Mesh>,
     log_mesh: Handle<Mesh>,
+    house_wall_mesh: Handle<Mesh>,
+    house_roof_mesh: Handle<Mesh>,
+    house_door_mesh: Handle<Mesh>,
+    house_window_mesh: Handle<Mesh>,
     tree_scene: Handle<WorldAsset>,
     axe_scene: Handle<WorldAsset>,
     bridge_scene: Handle<WorldAsset>,
@@ -78,6 +90,10 @@ pub(crate) struct WorldRenderAssets {
     ground_material: Handle<StandardMaterial>,
     river_material: Handle<StandardMaterial>,
     object_material: Handle<StandardMaterial>,
+    house_wall_material: Handle<StandardMaterial>,
+    house_roof_material: Handle<StandardMaterial>,
+    house_door_material: Handle<StandardMaterial>,
+    house_window_material: Handle<StandardMaterial>,
 }
 
 #[derive(Resource, Default)]
@@ -116,7 +132,8 @@ pub(crate) fn setup_scene(
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, -0.5, 0.0)),
     ));
 
-    let render_assets = WorldRenderAssets {// 描画用のアセットをロードする
+    let render_assets = WorldRenderAssets {
+        // 描画用のアセットをロードする
         ground_mesh: meshes.add(Plane3d::default().mesh().size(CHUNK_SIZE, CHUNK_SIZE)),
         river_mesh: meshes.add(Cuboid::new(
             RIVER_CHANNEL_WIDTH,
@@ -125,6 +142,10 @@ pub(crate) fn setup_scene(
         )),
         popup_mesh: meshes.add(Cuboid::new(0.35, 0.35, 0.35)),
         log_mesh: meshes.add(Cylinder::new(0.5, 1.0)),
+        house_wall_mesh: meshes.add(Cuboid::new(3.2, 2.0, 2.8)),
+        house_roof_mesh: meshes.add(Cuboid::new(2.4, 0.16, 3.0)),
+        house_door_mesh: meshes.add(Cuboid::new(0.12, 1.35, 0.72)),
+        house_window_mesh: meshes.add(Cuboid::new(0.12, 0.48, 0.48)),
         tree_scene: asset_server
             .load::<WorldAsset>(GltfAssetLabel::Scene(0).from_asset("3D_Object/tree_oak.glb")),
         axe_scene: asset_server
@@ -138,8 +159,13 @@ pub(crate) fn setup_scene(
         ground_material: materials.add(Color::srgb(0.35, 0.55, 0.32)),
         river_material: materials.add(Color::srgb(0.12, 0.55, 0.78)),
         object_material: materials.add(Color::srgb(0.48, 0.27, 0.12)),
+        house_wall_material: materials.add(Color::srgb(0.82, 0.68, 0.45)),
+        house_roof_material: materials.add(Color::srgb(0.48, 0.18, 0.13)),
+        house_door_material: materials.add(Color::srgb(0.32, 0.16, 0.08)),
+        house_window_material: materials.add(Color::srgb(0.35, 0.68, 0.76)),
     };
-    commands.spawn((// プレイヤーのEntityを生成する
+    commands.spawn((
+        // プレイヤーのEntityを生成する
         Player::default(),
         WorldAssetRoot(render_assets.player_scene.clone()),
         Transform::from_xyz(0.0, PLAYER_GROUND_Y, 0.0),
@@ -153,7 +179,8 @@ pub(crate) fn setup_scene(
         Transform::from_xyz(0.0, 3.8, 8.0).looking_at(Vec3::new(0.0, 0.6, -3.0), Vec3::Y),
     ));
 
-    commands.spawn((// 所持品HUDのEntityを生成する
+    commands.spawn((
+        // 所持品HUDのEntityを生成する
         InventoryHud,
         Text::new("もちもの\n1 おの  0\n2 木ざい 0\n1/2 えらぶ"),
         TextFont {
@@ -172,7 +199,8 @@ pub(crate) fn setup_scene(
         BackgroundColor(Color::srgba(0.04, 0.08, 0.08, 0.72)),
     ));
 
-    commands.spawn((// 操作案内HUDのEntityを生成する
+    commands.spawn((
+        // 操作案内HUDのEntityを生成する
         InteractionPrompt,
         Text::new(""),
         TextFont {
@@ -192,7 +220,8 @@ pub(crate) fn setup_scene(
         Visibility::Hidden,
     ));
 
-    commands.spawn((// NPCの会話HUDのEntityを生成する
+    commands.spawn((
+        // NPCの会話HUDのEntityを生成する
         NpcDialogueHud,
         Text::new(""),
         TextFont {
@@ -218,7 +247,8 @@ pub(crate) fn setup_scene(
     commands.insert_resource(render_assets);
 }
 
-pub(crate) fn validate_required_entities(// 必須のEntityが存在することを確認する
+pub(crate) fn validate_required_entities(
+    // 必須のEntityが存在することを確認する
     players: Query<(), With<Player>>,
     cameras: Query<(), With<FollowCamera>>,
     inventory_huds: Query<(), With<InventoryHud>>,
@@ -238,7 +268,8 @@ pub(crate) fn validate_required_entities(// 必須のEntityが存在すること
     report_singleton_entity("クエスト案内HUD", quest_hints.iter().count());
 }
 
-fn report_singleton_entity(name: &str, count: usize) {// 指定されたEntityが1つだけ存在することを確認する
+fn report_singleton_entity(name: &str, count: usize) {
+    // 指定されたEntityが1つだけ存在することを確認する
     if count != 1 {
         error!("{name} Entityは1つ必要ですが、{count}個あります");
     }
@@ -258,37 +289,59 @@ fn spawn_riverside_npc(commands: &mut Commands, assets: &WorldRenderAssets) {
     // 川辺のNPCのEntityを生成する
     commands.spawn((
         RiversideNpc,
+        QuestGiver(BRIDGE_QUEST_ID),
         WorldAssetRoot(assets.npc_scene.clone()),
         Transform::from_xyz(NPC_START_X, 0.0, 0.0).with_rotation(npc_facing(Vec3::X)),
         Visibility::Inherited,
     ));
 }
 
-pub(crate) fn update_riverside_npc(// 川辺のNPCの会話HUDを更新する
+pub(crate) fn update_riverside_npc(
+    // 川辺のNPCの会話HUDを更新する
     flags: Res<WorldFlags>,
     notebook: Res<NotebookState>,
     players: Query<&Transform, (With<Player>, Without<RiversideNpc>)>,
-    npcs: Query<&Transform, (With<RiversideNpc>, Without<Player>)>,
+    npcs: Query<
+        (&Transform, Option<&RiversideNpc>, Option<&HouseBuilderNpc>),
+        (
+            Or<(With<RiversideNpc>, With<HouseBuilderNpc>)>,
+            Without<Player>,
+        ),
+    >,
     mut dialogue_huds: Query<(&mut Text, &mut Visibility), With<NpcDialogueHud>>,
 ) {
-    let (Ok(player_transform), Ok(npc_transform), Ok((mut text, mut visibility))) =
-        (players.single(), npcs.single(), dialogue_huds.single_mut())
+    let (Ok(player_transform), Ok((mut text, mut visibility))) =
+        (players.single(), dialogue_huds.single_mut())
     else {
         return;
     };
 
-    text.set_if_neq(Text::new(riverside_npc_line(
-        flags.is_set(WorldFlag::BridgeBuilt),
-    )));
-    visibility.set_if_neq(
-        if !notebook.is_open()
-            && is_near_npc(player_transform.translation, npc_transform.translation)
-        {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        },
-    );
+    let nearest_dialogue = npcs
+        .iter()
+        .filter_map(|(npc_transform, riverside, house_builder)| {
+            let offset = player_transform.translation - npc_transform.translation;
+            let distance = Vec2::new(offset.x, offset.z).length();
+            if distance > NPC_DIALOGUE_DISTANCE {
+                return None;
+            }
+
+            let line = if riverside.is_some() {
+                riverside_npc_line(flags.is_set(WorldFlag::BridgeBuilt))
+            } else if house_builder.is_some() {
+                house_builder_npc_line(flags.is_set(WorldFlag::HouseBuilt))
+            } else {
+                return None;
+            };
+            Some((distance, line))
+        })
+        .min_by(|left, right| left.0.total_cmp(&right.0));
+
+    text.set_if_neq(Text::new(nearest_dialogue.map_or("", |(_, line)| line)));
+    visibility.set_if_neq(if !notebook.is_open() && nearest_dialogue.is_some() {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    });
 }
 
 pub(crate) fn is_near_npc(player_position: Vec3, npc_position: Vec3) -> bool {
@@ -297,7 +350,8 @@ pub(crate) fn is_near_npc(player_position: Vec3, npc_position: Vec3) -> bool {
     Vec2::new(offset.x, offset.z).length_squared() <= NPC_DIALOGUE_DISTANCE.powi(2)
 }
 
-fn riverside_npc_line(bridge_built: bool) -> &'static str {// 川辺のNPCの会話内容を返す
+fn riverside_npc_line(bridge_built: bool) -> &'static str {
+    // 川辺のNPCの会話内容を返す
     if bridge_built {
         "ありがとう！"
     } else {
@@ -305,7 +359,16 @@ fn riverside_npc_line(bridge_built: bool) -> &'static str {// 川辺のNPCの会
     }
 }
 
-fn npc_facing(direction: Vec3) -> Quat {// NPCが指定された方向を向くように回転を計算する
+fn house_builder_npc_line(house_built: bool) -> &'static str {
+    if house_built {
+        "ありがとう！これで家ができるよ！"
+    } else {
+        "あと　もくざいが4つあるとできるんだけどな"
+    }
+}
+
+fn npc_facing(direction: Vec3) -> Quat {
+    // NPCが指定された方向を向くように回転を計算する
     Transform::IDENTITY.looking_to(direction, Vec3::Y).rotation
 }
 
@@ -377,8 +440,8 @@ pub(crate) fn definition_chunk_coord(world_coord: ChunkCoord) -> ChunkCoord {
     }
 }
 
-
-fn spawn_chunk(// チャンク定義から描画用の親Entityと各配置Entityを生成する
+fn spawn_chunk(
+    // チャンク定義から描画用の親Entityと各配置Entityを生成する
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     assets: &WorldRenderAssets,
@@ -426,9 +489,10 @@ fn spawn_chunk(// チャンク定義から描画用の親Entityと各配置Entit
     for placement in &definition.objects {
         if progress.collected_objects.contains(&placement.id)
             || progress.chopped_trees.contains(&placement.id)
-            || placement
-                .completion_flag
-                .is_some_and(|flag| flags.is_set(flag))
+            || (placement.kind != ObjectKind::House
+                && placement
+                    .completion_flag
+                    .is_some_and(|flag| flags.is_set(flag)))
         {
             continue;
         }
@@ -548,13 +612,36 @@ fn spawn_object(
         return;
     }
 
+    if placement.kind == ObjectKind::HouseBuilderNpc {
+        let npc = commands
+            .spawn((
+                ChildOf(chunk_root),
+                HouseBuilderNpc,
+                QuestGiver(HOUSE_QUEST_ID),
+                ObjectEntity(placement.id),
+                ObjectCollider(placement.collider),
+                Interactable {
+                    action: InteractionAction::BuildQuest(HOUSE_QUEST_ID),
+                },
+                WorldAssetRoot(assets.npc_scene.clone()),
+                Transform::from_translation(world_position).with_rotation(npc_facing(Vec3::X)),
+                Visibility::Inherited,
+            ))
+            .id();
+        spawn_interaction_popup(commands, assets, npc, 2.2);
+        return;
+    }
+
     let transform = Transform {
         translation: world_position,
         rotation: placement.rotation,
         ..default()
     };
     let ColliderShape::Box { half_extents } = placement.collider else {
-        panic!("橋または建設地点のColliderは直方体である必要があります: {}", placement.id.0);
+        panic!(
+            "橋、家、または建設地点のColliderは直方体である必要があります: {}",
+            placement.id.0
+        );
     };
 
     match placement.kind {
@@ -565,11 +652,7 @@ fn spawn_object(
                     ObjectEntity(placement.id),
                     ObjectCollider(placement.collider),
                     Interactable {
-                        action: InteractionAction::BuildBridge(
-                            placement
-                                .completion_flag
-                                .expect("bridge site must have a completion flag"),
-                        ),
+                        action: InteractionAction::BuildQuest(BRIDGE_QUEST_ID),
                     },
                     transform,
                     Visibility::Inherited,
@@ -609,7 +692,66 @@ fn spawn_object(
                 Visibility::Inherited,
             ));
         }
-        ObjectKind::Tree | ObjectKind::AxePickup => unreachable!(),
+        ObjectKind::House => spawn_house(
+            commands,
+            assets,
+            chunk_root,
+            world_position,
+            placement,
+            flags,
+        ),
+        ObjectKind::Tree | ObjectKind::AxePickup | ObjectKind::HouseBuilderNpc => unreachable!(),
+    }
+}
+
+fn spawn_house(
+    commands: &mut Commands,
+    assets: &WorldRenderAssets,
+    chunk_root: Entity,
+    world_position: Vec3,
+    placement: ObjectPlacement,
+    flags: &WorldFlags,
+) {
+    let house = commands
+        .spawn((
+            ChildOf(chunk_root),
+            House,
+            ObjectEntity(placement.id),
+            Transform::from_translation(world_position).with_rotation(placement.rotation),
+            if flags.is_set(WorldFlag::HouseBuilt) {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            },
+        ))
+        .id();
+    commands.spawn((
+        ChildOf(house),
+        Mesh3d(assets.house_wall_mesh.clone()),
+        MeshMaterial3d(assets.house_wall_material.clone()),
+        Transform::from_xyz(0.0, 1.0, 0.0),
+    ));
+    for (x, angle) in [(-0.95, 0.45), (0.95, -0.45)] {
+        commands.spawn((
+            ChildOf(house),
+            Mesh3d(assets.house_roof_mesh.clone()),
+            MeshMaterial3d(assets.house_roof_material.clone()),
+            Transform::from_xyz(x, 2.48, 0.0).with_rotation(Quat::from_rotation_z(angle)),
+        ));
+    }
+    commands.spawn((
+        ChildOf(house),
+        Mesh3d(assets.house_door_mesh.clone()),
+        MeshMaterial3d(assets.house_door_material.clone()),
+        Transform::from_xyz(-1.65, 0.68, 0.0),
+    ));
+    for z in [-0.82, 0.82] {
+        commands.spawn((
+            ChildOf(house),
+            Mesh3d(assets.house_window_mesh.clone()),
+            MeshMaterial3d(assets.house_window_material.clone()),
+            Transform::from_xyz(-1.65, 1.4, z),
+        ));
     }
 }
 
@@ -619,7 +761,8 @@ fn bridge_model_transform(half_extents: Vec3) -> Transform {
     Transform::from_rotation(Quat::from_rotation_y(FRAC_PI_2)).with_scale(Vec3::splat(scale))
 }
 
-fn spawn_interaction_popup(// 配置のEntityの上にInteractionPopupを生成する
+fn spawn_interaction_popup(
+    // 配置のEntityの上にInteractionPopupを生成する
     commands: &mut Commands,
     assets: &WorldRenderAssets,
     target: Entity,
@@ -635,29 +778,41 @@ fn spawn_interaction_popup(// 配置のEntityの上にInteractionPopupを生成�
     ));
 }
 
-pub(crate) fn react_to_flag_changes(// WorldFlagの変更に応じて、橋の表示状態を切り替える
+pub(crate) fn react_to_flag_changes(
+    // WorldFlagの変更に応じて、橋の表示状態を切り替える
     mut flag_changed: MessageReader<FlagChanged>,
-    mut bridges: Query<&mut Visibility, With<Bridge>>,
+    mut bridges: Query<&mut Visibility, (With<Bridge>, Without<House>)>,
+    mut houses: Query<&mut Visibility, (With<House>, Without<Bridge>)>,
 ) {
     for change in flag_changed.read() {
-        if change.flag == WorldFlag::BridgeBuilt && change.value {
-            for mut visibility in &mut bridges {
-                *visibility = Visibility::Visible;
+        if change.value {
+            match change.flag {
+                WorldFlag::BridgeBuilt => {
+                    for mut visibility in &mut bridges {
+                        visibility.set_if_neq(Visibility::Visible);
+                    }
+                }
+                WorldFlag::HouseBuilt => {
+                    for mut visibility in &mut houses {
+                        visibility.set_if_neq(Visibility::Visible);
+                    }
+                }
             }
         }
     }
 }
 
 #[cfg(test)]
-mod tests {// テスト用のモジュール
+mod tests {
+    // テスト用のモジュール
     use super::*;
-    use bevy::camera::visibility::{InheritedVisibility, VisibilityPlugin};
-    use bevy::transform::TransformPlugin;
     use crate::interaction::perform_interaction;
     use crate::inventory::{Inventory, ItemKind, select_inventory_item};
     use crate::player::{PLAYER_GROUND_Y, PLAYER_HALF_SIZE};
-    use crate::quest::{self, BRIDGE_QUEST_ID, NotebookState, QuestLog};
-    use crate::world::{ObjectInstanceId, WorldMap};
+    use crate::quest::{self, BRIDGE_QUEST_ID, HOUSE_QUEST_ID, NotebookState, QuestLog};
+    use crate::world::{HOUSE_BUILDER_NPC_ID, HOUSE_OBJECT_ID, ObjectInstanceId, WorldMap};
+    use bevy::camera::visibility::{InheritedVisibility, VisibilityPlugin};
+    use bevy::transform::TransformPlugin;
 
     #[test]
     fn npc_dialogue_visibility_uses_horizontal_distance() {
@@ -684,6 +839,18 @@ mod tests {// テスト用のモジュール
     }
 
     #[test]
+    fn house_builder_npc_changes_line_when_the_house_is_built() {
+        assert_eq!(
+            house_builder_npc_line(false),
+            "あと　もくざいが4つあるとできるんだけどな"
+        );
+        assert_eq!(
+            house_builder_npc_line(true),
+            "ありがとう！これで家ができるよ！"
+        );
+    }
+
+    #[test]
     fn slope_mesh_has_subdivided_triangles_for_smooth_height_changes() {
         let world_map = WorldMap::prototype();
         let mesh = create_slope_mesh(&world_map, ChunkCoord { x: 7, z: 10 });
@@ -693,7 +860,9 @@ mod tests {// テスト用のモジュール
             (TERRAIN_MESH_SUBDIVISIONS + 1).pow(2)
         );
         assert_eq!(
-            mesh.indices().expect("slope mesh has triangle indices").len(),
+            mesh.indices()
+                .expect("slope mesh has triangle indices")
+                .len(),
             TERRAIN_MESH_SUBDIVISIONS.pow(2) * 6
         );
     }
@@ -710,11 +879,7 @@ mod tests {// テスト用のモジュール
             .id();
         let popup = app
             .world_mut()
-            .spawn((
-                ChildOf(parent),
-                Transform::default(),
-                Visibility::Hidden,
-            ))
+            .spawn((ChildOf(parent), Transform::default(), Visibility::Hidden))
             .id();
         app.update();
         assert!(
@@ -738,11 +903,7 @@ mod tests {// テスト用のモジュール
         // WorldAssetRoot may attach its scene hierarchy after the popup has become visible.
         let model_root = app
             .world_mut()
-            .spawn((
-                ChildOf(popup),
-                Transform::default(),
-                Visibility::Inherited,
-            ))
+            .spawn((ChildOf(popup), Transform::default(), Visibility::Inherited))
             .id();
         let model = app
             .world_mut()
@@ -761,9 +922,7 @@ mod tests {// テスト用のモジュール
                 .get()
         );
 
-        app.world_mut()
-            .entity_mut(popup)
-            .insert(Visibility::Hidden);
+        app.world_mut().entity_mut(popup).insert(Visibility::Hidden);
         app.update();
         assert!(
             !app.world()
@@ -780,7 +939,11 @@ mod tests {// テスト用のモジュール
             .join(BRIDGE_ASSET_PATH);
         let gltf = bevy::gltf::gltf::Gltf::open(&path).expect("bridge GLB must be valid");
         assert!(gltf.blob.is_some(), "bridge GLB must contain its mesh data");
-        let scene = gltf.document.scenes().next().expect("bridge GLB needs Scene0");
+        let scene = gltf
+            .document
+            .scenes()
+            .next()
+            .expect("bridge GLB needs Scene0");
         let mut bounds = None;
         for node in scene.nodes() {
             extend_gltf_bounds(node, Mat4::IDENTITY, &mut bounds);
@@ -914,6 +1077,10 @@ mod tests {// テスト用のモジュール
             river_mesh: Handle::default(),
             popup_mesh: Handle::default(),
             log_mesh: Handle::default(),
+            house_wall_mesh: Handle::default(),
+            house_roof_mesh: Handle::default(),
+            house_door_mesh: Handle::default(),
+            house_window_mesh: Handle::default(),
             tree_scene: Handle::default(),
             axe_scene: Handle::default(),
             bridge_scene: Handle::default(),
@@ -922,6 +1089,10 @@ mod tests {// テスト用のモジュール
             ground_material: Handle::default(),
             river_material: Handle::default(),
             object_material: Handle::default(),
+            house_wall_material: Handle::default(),
+            house_roof_material: Handle::default(),
+            house_door_material: Handle::default(),
+            house_window_material: Handle::default(),
         };
         let mut app = App::new();
         app.insert_resource(WorldMap::prototype())
@@ -954,10 +1125,17 @@ mod tests {// テスト用のモジュール
                 Transform::from_xyz(1.0, PLAYER_GROUND_Y, 1.0),
             ))
             .id();
-        app.world_mut()
-            .spawn((RiversideNpc, Transform::from_xyz(NPC_START_X, 0.0, 0.0)));
+        app.world_mut().spawn((
+            RiversideNpc,
+            QuestGiver(BRIDGE_QUEST_ID),
+            Transform::from_xyz(NPC_START_X, 0.0, 0.0),
+        ));
         app.update();
-        assert!(app.world().resource::<QuestLog>().has_started(BRIDGE_QUEST_ID));
+        assert!(
+            app.world()
+                .resource::<QuestLog>()
+                .has_started(BRIDGE_QUEST_ID)
+        );
 
         let mut bridges = app
             .world_mut()
@@ -974,12 +1152,19 @@ mod tests {// テスト用のモジュール
             .iter(app.world())
             .find(|(parent, _, _)| parent.parent() == bridge_entity)
             .expect("the bridge has one GLB model");
-        assert_eq!(model.0, app.world().resource::<WorldRenderAssets>().bridge_scene);
+        assert_eq!(
+            model.0,
+            app.world().resource::<WorldRenderAssets>().bridge_scene
+        );
         assert!((model_transform.rotation * Vec3::Z - Vec3::X).length() < 0.001);
 
-        let mut targets = app
-            .world_mut()
-            .query::<(Entity, &ObjectEntity, &ObjectCollider, &Transform, &Interactable)>();
+        let mut targets = app.world_mut().query::<(
+            Entity,
+            &ObjectEntity,
+            &ObjectCollider,
+            &Transform,
+            &Interactable,
+        )>();
         let (site, site_collider, site_transform) = targets
             .iter(app.world())
             .find(|(_, object, _, _, _)| object.0 == ObjectInstanceId(1))
@@ -1008,10 +1193,7 @@ mod tests {// テスト用のモジュール
         assert_eq!(app.world().resource::<Inventory>().count(ItemKind::Axe), 0);
 
         press_key_and_update(&mut app, KeyCode::KeyE);
-        assert_eq!(
-            app.world().resource::<Inventory>().count(ItemKind::Axe),
-            1
-        );
+        assert_eq!(app.world().resource::<Inventory>().count(ItemKind::Axe), 1);
         assert!(
             app.world()
                 .resource::<WorldProgress>()
@@ -1030,10 +1212,7 @@ mod tests {// テスト用のモジュール
                 .any(|object| object.0 == ObjectInstanceId(501))
         );
         press_key_and_update(&mut app, KeyCode::KeyE);
-        assert_eq!(
-            app.world().resource::<Inventory>().count(ItemKind::Wood),
-            1
-        );
+        assert_eq!(app.world().resource::<Inventory>().count(ItemKind::Wood), 1);
         assert!(
             app.world()
                 .resource::<WorldProgress>()
@@ -1043,7 +1222,11 @@ mod tests {// テスト用のモジュール
 
         press_key_and_update(&mut app, KeyCode::KeyN);
         press_key_and_update(&mut app, KeyCode::Digit2);
-        assert!(app.world().resource::<Inventory>().is_selected(ItemKind::Axe));
+        assert!(
+            app.world()
+                .resource::<Inventory>()
+                .is_selected(ItemKind::Axe)
+        );
         press_key_and_update(&mut app, KeyCode::KeyN);
         press_key_and_update(&mut app, KeyCode::Digit2);
         assert!(
@@ -1056,17 +1239,17 @@ mod tests {// テスト用のモジュール
             .expect("test player still exists")
             .translation = Vec3::new(3.0, PLAYER_GROUND_Y, 0.0);
         press_key_and_update(&mut app, KeyCode::KeyE);
-        assert!(app.world().resource::<WorldFlags>().is_set(WorldFlag::BridgeBuilt));
+        assert!(
+            app.world()
+                .resource::<WorldFlags>()
+                .is_set(WorldFlag::BridgeBuilt)
+        );
         assert!(app.world().get_entity(site).is_err());
-        assert_eq!(
-            app.world().resource::<Inventory>().count(ItemKind::Wood),
-            0
-        );
-        assert_eq!(
-            app.world().resource::<Inventory>().count(ItemKind::Axe),
-            1
-        );
-        let mut bridges = app.world_mut().query_filtered::<&Visibility, With<Bridge>>();
+        assert_eq!(app.world().resource::<Inventory>().count(ItemKind::Wood), 0);
+        assert_eq!(app.world().resource::<Inventory>().count(ItemKind::Axe), 1);
+        let mut bridges = app
+            .world_mut()
+            .query_filtered::<&Visibility, With<Bridge>>();
         assert_eq!(
             *bridges.single(app.world()).expect("built bridge is loaded"),
             Visibility::Visible
@@ -1099,11 +1282,198 @@ mod tests {// テスト用のモジュール
         assert_eq!(reloaded_bridges.len(), 1);
         assert_eq!(*reloaded_bridges[0], Visibility::Visible);
 
-        assert!(!app.world().resource::<WorldMap>().blocks_movement(
-            Vec3::new(5.8, 0.0, 0.0),
-            app.world().resource::<WorldFlags>().is_set(WorldFlag::BridgeBuilt),
-            0.4,
-        ));
+        assert!(
+            !app.world().resource::<WorldMap>().blocks_movement(
+                Vec3::new(5.8, 0.0, 0.0),
+                app.world()
+                    .resource::<WorldFlags>()
+                    .is_set(WorldFlag::BridgeBuilt),
+                0.4,
+            )
+        );
+    }
+
+    #[test]
+    fn four_wood_builds_house_and_house_survives_chunk_reload() {
+        let render_assets = WorldRenderAssets {
+            ground_mesh: Handle::default(),
+            river_mesh: Handle::default(),
+            popup_mesh: Handle::default(),
+            log_mesh: Handle::default(),
+            house_wall_mesh: Handle::default(),
+            house_roof_mesh: Handle::default(),
+            house_door_mesh: Handle::default(),
+            house_window_mesh: Handle::default(),
+            tree_scene: Handle::default(),
+            axe_scene: Handle::default(),
+            bridge_scene: Handle::default(),
+            player_scene: Handle::default(),
+            npc_scene: Handle::default(),
+            ground_material: Handle::default(),
+            river_material: Handle::default(),
+            object_material: Handle::default(),
+            house_wall_material: Handle::default(),
+            house_roof_material: Handle::default(),
+            house_door_material: Handle::default(),
+            house_window_material: Handle::default(),
+        };
+        let mut flags = WorldFlags::default();
+        flags.set(WorldFlag::BridgeBuilt, true);
+        let mut app = App::new();
+        app.insert_resource(WorldMap::prototype())
+            .insert_resource(render_assets)
+            .insert_resource(flags)
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<WorldProgress>()
+            .init_resource::<Inventory>()
+            .init_resource::<QuestLog>()
+            .init_resource::<NotebookState>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .add_message::<FlagChanged>()
+            .add_systems(
+                Update,
+                (
+                    sync_loaded_chunks,
+                    select_inventory_item.run_if(quest::gameplay_enabled),
+                    perform_interaction.run_if(quest::gameplay_enabled),
+                    react_to_flag_changes,
+                    quest::update_quests,
+                )
+                    .chain(),
+            );
+
+        let player = app
+            .world_mut()
+            .spawn((
+                Player::default(),
+                Transform::from_xyz(9.2, PLAYER_GROUND_Y, 2.5),
+            ))
+            .id();
+        app.update();
+        assert!(
+            app.world()
+                .resource::<QuestLog>()
+                .has_started(HOUSE_QUEST_ID)
+        );
+        assert!(
+            !app.world()
+                .resource::<WorldFlags>()
+                .is_set(WorldFlag::HouseBuilt)
+        );
+
+        let mut interactable_entities = app
+            .world_mut()
+            .query::<(&ObjectEntity, &Transform, &Interactable)>();
+        let builder_position = interactable_entities
+            .iter(app.world())
+            .find(|(object, _, _)| object.0 == HOUSE_BUILDER_NPC_ID)
+            .map(|(_, transform, _)| transform.translation)
+            .expect("house builder NPC is loaded east of the bridge");
+
+        let mut houses = app
+            .world_mut()
+            .query_filtered::<(&ObjectEntity, &Visibility), With<House>>();
+        let (house_object, house_visibility) = houses
+            .single(app.world())
+            .expect("house site exists before construction");
+        assert_eq!(house_object.0, HOUSE_OBJECT_ID);
+        assert_eq!(*house_visibility, Visibility::Hidden);
+
+        app.world_mut()
+            .resource_mut::<Inventory>()
+            .add(ItemKind::Axe, 1);
+        let mut trees = app.world_mut().query::<(&ObjectEntity, &Transform)>();
+        let tree_positions: Vec<_> = trees
+            .iter(app.world())
+            .filter(|(object, _)| (502..=505).contains(&object.0.0))
+            .map(|(object, transform)| (object.0, transform.translation))
+            .collect();
+        assert_eq!(tree_positions.len(), 4);
+
+        for (index, (_, position)) in tree_positions.iter().take(3).enumerate() {
+            app.world_mut()
+                .get_mut::<Transform>(player)
+                .expect("player exists")
+                .translation = Vec3::new(position.x, PLAYER_GROUND_Y, position.z);
+            press_key_and_update(&mut app, KeyCode::KeyE);
+            assert_eq!(
+                app.world().resource::<Inventory>().count(ItemKind::Wood),
+                index as u32 + 1
+            );
+        }
+
+        app.world_mut()
+            .get_mut::<Transform>(player)
+            .expect("player exists")
+            .translation = builder_position;
+        press_key_and_update(&mut app, KeyCode::Digit2);
+        press_key_and_update(&mut app, KeyCode::KeyE);
+        assert!(
+            !app.world()
+                .resource::<WorldFlags>()
+                .is_set(WorldFlag::HouseBuilt)
+        );
+        assert_eq!(app.world().resource::<Inventory>().count(ItemKind::Wood), 3);
+
+        let (_, last_tree_position) = tree_positions[3];
+        app.world_mut()
+            .get_mut::<Transform>(player)
+            .expect("player exists")
+            .translation = Vec3::new(last_tree_position.x, PLAYER_GROUND_Y, last_tree_position.z);
+        press_key_and_update(&mut app, KeyCode::Digit1);
+        press_key_and_update(&mut app, KeyCode::KeyE);
+        assert_eq!(app.world().resource::<Inventory>().count(ItemKind::Wood), 4);
+        app.world_mut()
+            .get_mut::<Transform>(player)
+            .expect("player exists")
+            .translation = builder_position;
+        press_key_and_update(&mut app, KeyCode::Digit2);
+        press_key_and_update(&mut app, KeyCode::KeyE);
+        assert!(
+            app.world()
+                .resource::<WorldFlags>()
+                .is_set(WorldFlag::HouseBuilt)
+        );
+        assert_eq!(app.world().resource::<Inventory>().count(ItemKind::Wood), 0);
+        assert_eq!(
+            house_builder_npc_line(
+                app.world()
+                    .resource::<WorldFlags>()
+                    .is_set(WorldFlag::HouseBuilt)
+            ),
+            "ありがとう！これで家ができるよ！"
+        );
+        let mut houses = app.world_mut().query_filtered::<&Visibility, With<House>>();
+        assert_eq!(
+            *houses.single(app.world()).expect("built house is visible"),
+            Visibility::Visible
+        );
+        let mut object_entities = app.world_mut().query::<&ObjectEntity>();
+        assert!(
+            object_entities
+                .iter(app.world())
+                .any(|object| object.0 == HOUSE_BUILDER_NPC_ID)
+        );
+
+        app.world_mut()
+            .get_mut::<Transform>(player)
+            .expect("player exists")
+            .translation = Vec3::new(45.0, PLAYER_GROUND_Y, 0.0);
+        app.update();
+        app.world_mut()
+            .get_mut::<Transform>(player)
+            .expect("player exists")
+            .translation = builder_position;
+        app.update();
+
+        let mut houses = app
+            .world_mut()
+            .query_filtered::<(&ObjectEntity, &Visibility), With<House>>();
+        let (house_object, house_visibility) = houses
+            .single(app.world())
+            .expect("house is restored when its chunk is loaded");
+        assert_eq!(house_object.0, HOUSE_OBJECT_ID);
+        assert_eq!(*house_visibility, Visibility::Visible);
     }
 
     fn press_key_and_update(app: &mut App, key: KeyCode) {

@@ -41,7 +41,8 @@ impl ItemKind {
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct Inventory {// プレイヤーのインベントリを管理する
+pub(crate) struct Inventory {
+    // プレイヤーのインベントリを管理する
     pub(crate) items: HashMap<ItemId, u32>,
     pub(crate) selected: Option<ItemId>,
 }
@@ -99,7 +100,8 @@ impl Inventory {
 #[derive(Component)]
 pub(crate) struct InventoryHud;
 
-pub(crate) fn select_inventory_item(// インベントリのアイテムを選択する
+pub(crate) fn select_inventory_item(
+    // インベントリのアイテムを選択する
     keyboard: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
     mut inventory: ResMut<Inventory>,
@@ -120,7 +122,8 @@ pub(crate) fn select_inventory_item(// インベントリのアイテムを選�
     }
 }
 
-pub(crate) fn update_inventory_hud(// インベントリHUDを更新する
+pub(crate) fn update_inventory_hud(
+    // インベントリHUDを更新する
     inventory: Res<Inventory>,
     notebook: Res<NotebookState>,
     mut hud: Query<(&mut Text, &mut Visibility), With<InventoryHud>>,
@@ -185,7 +188,11 @@ mod tests {
             .digital_mut()
             .press(GamepadButton::DPadRight);
         app.update();
-        assert!(app.world().resource::<Inventory>().is_selected(ItemKind::Wood));
+        assert!(
+            app.world()
+                .resource::<Inventory>()
+                .is_selected(ItemKind::Wood)
+        );
 
         let mut input = app
             .world_mut()
@@ -195,6 +202,10 @@ mod tests {
         input.digital_mut().press(GamepadButton::DPadLeft);
         drop(input);
         app.update();
-        assert!(app.world().resource::<Inventory>().is_selected(ItemKind::Axe));
+        assert!(
+            app.world()
+                .resource::<Inventory>()
+                .is_selected(ItemKind::Axe)
+        );
     }
 }

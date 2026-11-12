@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use crate::inventory::{Inventory, ItemKind};
 use crate::player::Player;
-use crate::quest::{NotebookState, definition_for_site};
+use crate::quest::{HOUSE_QUEST_ID, NotebookState, QuestLog, definition, definition_for_target};
 use crate::scene::{
     FlagChanged, Interactable, InteractionAction, InteractionPopup, InteractionPrompt,
     ObjectCollider, ObjectEntity, WorldFlags, WorldProgress,
@@ -15,7 +15,8 @@ pub(crate) fn is_in_interaction_range(distance: f32, collider: ColliderShape) ->
     distance <= INTERACTION_DISTANCE + collider.horizontal_radius()
 }
 
-pub(crate) fn perform_interaction(// プレイヤーが対象とインタラクトする
+pub(crate) fn perform_interaction(
+    // プレイヤーが対象とインタラクトする
     mut commands: Commands,
     keyboard: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
@@ -30,6 +31,7 @@ pub(crate) fn perform_interaction(// プレイヤーが対象とインタラク�
     mut inventory: ResMut<Inventory>,
     mut flags: ResMut<WorldFlags>,
     mut progress: ResMut<WorldProgress>,
+    quests: Res<QuestLog>,
     mut flag_changed: MessageWriter<FlagChanged>,
 ) {
     let keyboard_pressed = keyboard.just_pressed(KeyCode::KeyE);
@@ -50,11 +52,13 @@ pub(crate) fn perform_interaction(// プレイヤーが対象とインタラク�
         &inventory,
         &flags,
         &progress,
+        &quests,
     ) else {
         return;
     };
 
-    match action {// 対象のアクションに応じてインタラクションを実行する
+    match action {
+        // 対象のアクションに応じてインタラクションを実行する
         InteractionAction::PickUp(item) => {
             inventory.add(item, 1);
             progress.collected_objects.insert(object_id);
@@ -68,21 +72,30 @@ pub(crate) fn perform_interaction(// プレイヤーが対象とインタラク�
             inventory.add(ItemKind::Wood, 1);
             commands.entity(entity).despawn();
         }
-        InteractionAction::BuildBridge(flag) => {
-            let quest = definition_for_site(object_id, flag);
+        InteractionAction::BuildQuest(quest_id) => {
+            let quest = definition_for_target(quest_id, object_id);
+            if !quests.has_started(quest_id) {
+                return;
+            }
             if !inventory.is_selected(quest.selected_item_kind())
                 || !quest.consume_materials(&mut inventory)
             {
                 return;
             }
-            flags.set(flag, true);
-            flag_changed.write(FlagChanged { flag, value: true });
-            commands.entity(entity).despawn();
+            flags.set(quest.completion_flag(), true);
+            flag_changed.write(FlagChanged {
+                flag: quest.completion_flag(),
+                value: true,
+            });
+            if quest.removes_target_on_completion() {
+                commands.entity(entity).despawn();
+            }
         }
     }
 }
 
-pub(crate) fn update_interaction_prompt(// 対話プロンプトを更新する
+pub(crate) fn update_interaction_prompt(
+    // 対話プロンプトを更新する
     players: Query<&Transform, With<Player>>,
     interactables: Query<(
         Entity,
@@ -95,6 +108,7 @@ pub(crate) fn update_interaction_prompt(// 対話プロンプトを更新する
     notebook: Res<NotebookState>,
     flags: Res<WorldFlags>,
     progress: Res<WorldProgress>,
+    quests: Res<QuestLog>,
     mut prompt: Query<(&mut Text, &mut Visibility), With<InteractionPrompt>>,
 ) {
     let Ok(player_transform) = players.single() else {
@@ -114,6 +128,7 @@ pub(crate) fn update_interaction_prompt(// 対話プロンプトを更新する
         &inventory,
         &flags,
         &progress,
+        &quests,
     );
     let (next_text, next_visibility) = if let Some((_, _, _, guidance)) = target {
         (guidance, Visibility::Visible)
@@ -124,7 +139,8 @@ pub(crate) fn update_interaction_prompt(// 対話プロンプトを更新する
     visibility.set_if_neq(next_visibility);
 }
 
-fn nearest_available_target<'a>(// プレイヤーに最も近い利用可能な対象を見つける
+fn nearest_available_target<'a>(
+    // プレイヤーに最も近い利用可能な対象を見つける
     player_transform: &Transform,
     interactables: impl Iterator<
         Item = (
@@ -138,19 +154,31 @@ fn nearest_available_target<'a>(// プレイヤーに最も近い利用可能な
     inventory: &Inventory,
     flags: &WorldFlags,
     progress: &WorldProgress,
+    quests: &QuestLog,
 ) -> Option<(f32, ObjectInstanceId, Entity, InteractionAction)> {
     interactables
         .filter_map(|(entity, transform, interactable, object, collider)| {
             let distance = player_transform.translation.distance(transform.translation);
-            let available =
-                can_perform_action(interactable.action, object.0, inventory, flags, progress);
-            (is_in_interaction_range(distance, collider.0) && available)
-                .then_some((distance, object.0, entity, interactable.action))
+            let available = can_perform_action(
+                interactable.action,
+                object.0,
+                inventory,
+                flags,
+                progress,
+                quests,
+            );
+            (is_in_interaction_range(distance, collider.0) && available).then_some((
+                distance,
+                object.0,
+                entity,
+                interactable.action,
+            ))
         })
         .min_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)))
 }
 
-fn nearest_guided_target<'a>(// 
+fn nearest_guided_target<'a>(
+    //
     player_transform: &Transform,
     interactables: impl Iterator<
         Item = (
@@ -164,14 +192,27 @@ fn nearest_guided_target<'a>(//
     inventory: &Inventory,
     flags: &WorldFlags,
     progress: &WorldProgress,
+    quests: &QuestLog,
 ) -> Option<(f32, ObjectInstanceId, Entity, String)> {
     interactables
         .filter_map(|(entity, transform, interactable, object, collider)| {
             let distance = player_transform.translation.distance(transform.translation);
-            let guidance =
-                interaction_guidance(interactable.action, object.0, inventory, flags, progress)?;
-            let available =
-                can_perform_action(interactable.action, object.0, inventory, flags, progress);
+            let guidance = interaction_guidance(
+                interactable.action,
+                object.0,
+                inventory,
+                flags,
+                progress,
+                quests,
+            )?;
+            let available = can_perform_action(
+                interactable.action,
+                object.0,
+                inventory,
+                flags,
+                progress,
+                quests,
+            );
             is_in_interaction_range(distance, collider.0)
                 .then_some((distance, object.0, entity, guidance, available))
         })
@@ -185,12 +226,14 @@ fn nearest_guided_target<'a>(//
         .map(|(distance, object_id, entity, guidance, _)| (distance, object_id, entity, guidance))
 }
 
-fn interaction_guidance(// 対話ガイダンスを生成する
+fn interaction_guidance(
+    // 対話ガイダンスを生成する
     action: InteractionAction,
     object_id: ObjectInstanceId,
     inventory: &Inventory,
     flags: &WorldFlags,
     progress: &WorldProgress,
+    quests: &QuestLog,
 ) -> Option<String> {
     if action_is_complete(action, object_id, flags, progress) {
         return None;
@@ -205,24 +248,21 @@ fn interaction_guidance(// 対話ガイダンスを生成する
             "1 おのを えらぼう".to_owned()
         }
         InteractionAction::ChopTree => "木を切る  [E]".to_owned(),
-        InteractionAction::BuildBridge(flag) => {
-            let quest = definition_for_site(object_id, flag);
-            if let Some(missing) = quest.missing_material(inventory) {
-                if missing.item_kind() != ItemKind::Wood {
-                    format!("{}を あつめよう", missing.item_kind().label())
-                } else if inventory.has(ItemKind::Axe) && inventory.is_selected(ItemKind::Axe) {
-                    "木を切って 木ざいを とろう".to_owned()
-                } else if inventory.has(ItemKind::Axe) {
-                    "1 おのを えらんで 木を切ろう".to_owned()
-                } else {
-                    "まず おのを さがそう".to_owned()
-                }
+        InteractionAction::BuildQuest(quest_id) => {
+            if !quests.has_started(quest_id) {
+                return None;
+            }
+            let quest = definition_for_target(quest_id, object_id);
+            if !quest.materials_available(inventory) {
+                quest.collecting_guidance(inventory)
             } else if !inventory.is_selected(quest.selected_item_kind()) {
                 if quest.selected_item_kind() == ItemKind::Wood {
-                    "2 木ざいを えらぼう".to_owned()
+                    format!("2 {}を えらぼう", quest.selected_item_kind().label())
                 } else {
                     format!("{}を えらぼう", quest.selected_item_kind().label())
                 }
+            } else if quest_id == HOUSE_QUEST_ID {
+                "いえを たてる  [E]".to_owned()
             } else {
                 "橋を作る  [E]".to_owned()
             }
@@ -230,7 +270,8 @@ fn interaction_guidance(// 対話ガイダンスを生成する
     })
 }
 
-fn action_is_complete(// 対話アクションが完了しているかどうかを確認する
+fn action_is_complete(
+    // 対話アクションが完了しているかどうかを確認する
     action: InteractionAction,
     object_id: ObjectInstanceId,
     flags: &WorldFlags,
@@ -239,16 +280,20 @@ fn action_is_complete(// 対話アクションが完了しているかどうか�
     match action {
         InteractionAction::PickUp(_) => progress.collected_objects.contains(&object_id),
         InteractionAction::ChopTree => progress.chopped_trees.contains(&object_id),
-        InteractionAction::BuildBridge(flag) => flags.is_set(flag),
+        InteractionAction::BuildQuest(quest_id) => definition(quest_id)
+            .unwrap_or_else(|| panic!("未知のクエストIDです: {}", quest_id.0))
+            .is_complete(flags),
     }
 }
 
-pub(crate) fn can_perform_action(// 対話アクションを実行できるかどうかを確認する
+pub(crate) fn can_perform_action(
+    // 対話アクションを実行できるかどうかを確認する
     action: InteractionAction,
     object_id: ObjectInstanceId,
     inventory: &Inventory,
     flags: &WorldFlags,
     progress: &WorldProgress,
+    quests: &QuestLog,
 ) -> bool {
     if action_is_complete(action, object_id, flags, progress) {
         return false;
@@ -259,9 +304,10 @@ pub(crate) fn can_perform_action(// 対話アクションを実行できるか�
         InteractionAction::ChopTree => {
             inventory.is_selected(ItemKind::Axe) && inventory.has(ItemKind::Axe)
         }
-        InteractionAction::BuildBridge(flag) => {
-            let quest = definition_for_site(object_id, flag);
-            inventory.is_selected(quest.selected_item_kind())
+        InteractionAction::BuildQuest(quest_id) => {
+            let quest = definition_for_target(quest_id, object_id);
+            quests.has_started(quest_id)
+                && inventory.is_selected(quest.selected_item_kind())
                 && quest.materials_available(inventory)
         }
     }
@@ -275,6 +321,7 @@ pub(crate) fn update_interaction_popups(
     notebook: Res<NotebookState>,
     flags: Res<WorldFlags>,
     progress: Res<WorldProgress>,
+    quests: Res<QuestLog>,
 ) {
     if notebook.is_open() {
         for (_, mut visibility) in &mut popups {
@@ -290,12 +337,15 @@ pub(crate) fn update_interaction_popups(
         let is_near = interactables.get(parent.parent()).is_ok_and(
             |(target, interactable, object, collider)| {
                 let available =
-                    !action_is_complete(interactable.action, object.0, &flags, &progress);
+                    !action_is_complete(interactable.action, object.0, &flags, &progress)
+                        && match interactable.action {
+                            InteractionAction::BuildQuest(quest_id) => quests.has_started(quest_id),
+                            _ => true,
+                        };
                 is_in_interaction_range(
                     player_transform.translation.distance(target.translation),
                     collider.0,
-                )
-                    && available
+                ) && available
             },
         );
 
@@ -308,8 +358,10 @@ pub(crate) fn update_interaction_popups(
 }
 
 #[cfg(test)]
-mod tests {// テストモジュール
+mod tests {
+    // テストモジュール
     use super::*;
+    use crate::quest::BRIDGE_QUEST_ID;
     use crate::world::WorldFlag;
 
     #[test]
@@ -319,6 +371,7 @@ mod tests {// テストモジュール
         let flags = WorldFlags::default();
         let mut progress = WorldProgress::default();
         let mut inventory = Inventory::default();
+        let quests = QuestLog::default();
 
         assert_eq!(
             interaction_guidance(
@@ -327,6 +380,7 @@ mod tests {// テストモジュール
                 &inventory,
                 &flags,
                 &progress,
+                &quests,
             )
             .as_deref(),
             Some("おのを さがそう")
@@ -342,6 +396,7 @@ mod tests {// テストモジュール
                 &inventory,
                 &flags,
                 &progress,
+                &quests,
             )
             .as_deref(),
             Some("1 おのを えらぼう")
@@ -355,6 +410,7 @@ mod tests {// テストモジュール
                 &inventory,
                 &flags,
                 &progress,
+                &quests,
             )
             .as_deref(),
             Some("木を切る  [E]")
@@ -368,6 +424,7 @@ mod tests {// テストモジュール
                 &inventory,
                 &flags,
                 &progress,
+                &quests,
             ),
             None
         );
@@ -377,44 +434,49 @@ mod tests {// テストモジュール
     fn bridge_guidance_explains_the_next_required_item() {
         // 橋のガイダンスが次に必要なアイテムを説明することを確認する
         let bridge_id = ObjectInstanceId(1);
-        let bridge_flag = WorldFlag::BridgeBuilt;
         let mut flags = WorldFlags::default();
         let progress = WorldProgress::default();
         let mut inventory = Inventory::default();
+        let mut quests = QuestLog::default();
+        quests.start(BRIDGE_QUEST_ID);
+        let bridge_action = InteractionAction::BuildQuest(BRIDGE_QUEST_ID);
 
         assert_eq!(
             interaction_guidance(
-                InteractionAction::BuildBridge(bridge_flag),
+                bridge_action,
                 bridge_id,
                 &inventory,
                 &flags,
                 &progress,
+                &quests,
             )
             .as_deref(),
-            Some("まず おのを さがそう")
+            Some("おのを さがそう")
         );
 
         inventory.add(ItemKind::Axe, 1);
         assert_eq!(
             interaction_guidance(
-                InteractionAction::BuildBridge(bridge_flag),
+                bridge_action,
                 bridge_id,
                 &inventory,
                 &flags,
                 &progress,
+                &quests,
             )
             .as_deref(),
-            Some("木を切って 木ざいを とろう")
+            Some("木を きって 木ざいを あつめよう")
         );
 
         inventory.add(ItemKind::Wood, 1);
         assert_eq!(
             interaction_guidance(
-                InteractionAction::BuildBridge(bridge_flag),
+                bridge_action,
                 bridge_id,
                 &inventory,
                 &flags,
                 &progress,
+                &quests,
             )
             .as_deref(),
             Some("2 木ざいを えらぼう")
@@ -423,26 +485,70 @@ mod tests {// テストモジュール
         inventory.select(ItemKind::Wood);
         assert_eq!(
             interaction_guidance(
-                InteractionAction::BuildBridge(bridge_flag),
+                bridge_action,
                 bridge_id,
                 &inventory,
                 &flags,
                 &progress,
+                &quests,
             )
             .as_deref(),
             Some("橋を作る  [E]")
         );
 
-        flags.set(bridge_flag, true);
+        flags.set(WorldFlag::BridgeBuilt, true);
         assert_eq!(
             interaction_guidance(
-                InteractionAction::BuildBridge(bridge_flag),
+                bridge_action,
                 bridge_id,
                 &inventory,
                 &flags,
                 &progress,
+                &quests,
             ),
             None
         );
+    }
+
+    #[test]
+    fn house_guidance_requires_four_wood_and_builds_only_when_selected() {
+        let house_id = crate::world::HOUSE_BUILDER_NPC_ID;
+        let mut inventory = Inventory::default();
+        let flags = WorldFlags::default();
+        let progress = WorldProgress::default();
+        let mut quests = QuestLog::default();
+        quests.start(HOUSE_QUEST_ID);
+        let action = InteractionAction::BuildQuest(HOUSE_QUEST_ID);
+
+        assert_eq!(
+            interaction_guidance(action, house_id, &inventory, &flags, &progress, &quests)
+                .as_deref(),
+            Some("おのを さがそう")
+        );
+        inventory.add(ItemKind::Axe, 1);
+        assert_eq!(
+            interaction_guidance(action, house_id, &inventory, &flags, &progress, &quests)
+                .as_deref(),
+            Some("木を 4つ きって 木ざいを あつめよう")
+        );
+        inventory.add(ItemKind::Wood, 3);
+        assert!(!can_perform_action(
+            action, house_id, &inventory, &flags, &progress, &quests
+        ));
+        inventory.add(ItemKind::Wood, 1);
+        assert_eq!(
+            interaction_guidance(action, house_id, &inventory, &flags, &progress, &quests)
+                .as_deref(),
+            Some("2 木ざいを えらぼう")
+        );
+        inventory.select(ItemKind::Wood);
+        assert_eq!(
+            interaction_guidance(action, house_id, &inventory, &flags, &progress, &quests)
+                .as_deref(),
+            Some("いえを たてる  [E]")
+        );
+        assert!(can_perform_action(
+            action, house_id, &inventory, &flags, &progress, &quests
+        ));
     }
 }

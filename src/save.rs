@@ -8,11 +8,14 @@ use bevy::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::inventory::{Inventory, ItemId, ItemKind};
+#[cfg(test)]
+use crate::quest::HOUSE_QUEST_ID;
 use crate::quest::{self, BRIDGE_QUEST_ID, QuestId, QuestLog};
 use crate::scene::{WorldFlags, WorldProgress};
 use crate::world::{ObjectInstanceId, ObjectKind, WorldFlag, WorldMap};
 
-const SAVE_VERSION: u32 = 2;
+const SAVE_VERSION: u32 = 3;
+const PREVIOUS_SAVE_VERSION: u32 = 2;
 const LEGACY_SAVE_VERSION: u32 = 1;
 const SAVE_FILE_NAME: &str = "progress.ron";
 
@@ -22,6 +25,8 @@ struct SaveData {
     items: Vec<SavedItem>,
     selected_item_id: Option<u16>,
     bridge_built: bool,
+    #[serde(default)]
+    house_built: bool,
     collected_object_ids: Vec<u32>,
     chopped_tree_ids: Vec<u32>,
     #[serde(
@@ -209,6 +214,7 @@ fn save_data_from_game(
             .collect(),
         selected_item_id: inventory.selected.map(|id| id.0),
         bridge_built: flags.is_set(WorldFlag::BridgeBuilt),
+        house_built: flags.is_set(WorldFlag::HouseBuilt),
         collected_object_ids: progress.collected_objects.iter().map(|id| id.0).collect(),
         chopped_tree_ids: progress.chopped_trees.iter().map(|id| id.0).collect(),
         started_quest_ids: Some(started_quest_ids),
@@ -216,10 +222,13 @@ fn save_data_from_game(
 }
 
 fn game_from_save_data(data: SaveData, world_map: &WorldMap) -> Result<LoadedGame, String> {
-    if data.version != LEGACY_SAVE_VERSION && data.version != SAVE_VERSION {
+    if data.version != LEGACY_SAVE_VERSION
+        && data.version != PREVIOUS_SAVE_VERSION
+        && data.version != SAVE_VERSION
+    {
         return Err(format!(
-            "未対応の保存形式バージョンです: {} (対応: {LEGACY_SAVE_VERSION}, {SAVE_VERSION})",
-            data.version,
+            "未対応の保存形式バージョンです: {} (対応: {LEGACY_SAVE_VERSION}, {PREVIOUS_SAVE_VERSION}, {SAVE_VERSION})",
+            data.version
         ));
     }
 
@@ -287,6 +296,7 @@ fn game_from_save_data(data: SaveData, world_map: &WorldMap) -> Result<LoadedGam
 
     let mut flags = WorldFlags::default();
     flags.set(WorldFlag::BridgeBuilt, data.bridge_built);
+    flags.set(WorldFlag::HouseBuilt, data.house_built);
 
     let started_quest_ids = match data.started_quest_ids {
         Some(ids) => ids,
@@ -371,14 +381,18 @@ mod tests {
         assert!(loaded.inventory.is_selected(ItemKind::Wood));
         assert!(loaded.flags.is_set(WorldFlag::BridgeBuilt));
         assert!(loaded.quests.has_started(BRIDGE_QUEST_ID));
-        assert!(loaded
-            .progress
-            .collected_objects
-            .contains(&ObjectInstanceId(500)));
-        assert!(loaded
-            .progress
-            .chopped_trees
-            .contains(&ObjectInstanceId(501)));
+        assert!(
+            loaded
+                .progress
+                .collected_objects
+                .contains(&ObjectInstanceId(500))
+        );
+        assert!(
+            loaded
+                .progress
+                .chopped_trees
+                .contains(&ObjectInstanceId(501))
+        );
     }
 
     #[test]
@@ -416,10 +430,12 @@ mod tests {
 
         let loaded = game_from_save_data(data, &world_map)
             .expect("tree IDs from before the hill was added remain valid");
-        assert!(loaded
-            .progress
-            .chopped_trees
-            .contains(&ObjectInstanceId(11_606)));
+        assert!(
+            loaded
+                .progress
+                .chopped_trees
+                .contains(&ObjectInstanceId(11_606))
+        );
     }
 
     #[test]
@@ -471,7 +487,12 @@ mod tests {
         assert_eq!(loaded.inventory.count(ItemKind::Axe), 1);
         assert!(loaded.flags.is_set(WorldFlag::BridgeBuilt));
         assert!(loaded.quests.has_started(BRIDGE_QUEST_ID));
-        assert!(loaded.progress.chopped_trees.contains(&ObjectInstanceId(501)));
+        assert!(
+            loaded
+                .progress
+                .chopped_trees
+                .contains(&ObjectInstanceId(501))
+        );
 
         let saved = save_data_from_game(
             &loaded.inventory,
@@ -519,6 +540,42 @@ mod tests {
         assert_eq!(loaded.inventory.count(ItemKind::Axe), 1);
         assert_eq!(loaded.inventory.count(ItemKind::Wood), 1);
         assert!(loaded.inventory.is_selected(ItemKind::Wood));
+    }
+
+    #[test]
+    fn completed_house_and_house_quest_round_trip() {
+        let mut inventory = Inventory::default();
+        inventory.add(ItemKind::Axe, 1);
+        let mut flags = WorldFlags::default();
+        flags.set(WorldFlag::BridgeBuilt, true);
+        flags.set(WorldFlag::HouseBuilt, true);
+        let mut quests = QuestLog::default();
+        quests.start(BRIDGE_QUEST_ID);
+        quests.start(HOUSE_QUEST_ID);
+        let data = save_data_from_game(&inventory, &flags, &WorldProgress::default(), &quests);
+        let encoded = ron::to_string(&data).expect("save data serializes");
+        let decoded = ron::from_str(&encoded).expect("save data deserializes");
+        let loaded = game_from_save_data(decoded, &WorldMap::prototype())
+            .expect("completed house is restored");
+
+        assert!(loaded.flags.is_set(WorldFlag::BridgeBuilt));
+        assert!(loaded.flags.is_set(WorldFlag::HouseBuilt));
+        assert!(loaded.quests.has_started(BRIDGE_QUEST_ID));
+        assert!(loaded.quests.has_started(HOUSE_QUEST_ID));
+    }
+
+    #[test]
+    fn version_two_save_migrates_without_a_completed_house() {
+        let contents = "(version:2,items:[(id:1,count:1)],selected_item_id:Some(1),\
+            bridge_built:true,collected_object_ids:[500],chopped_tree_ids:[501],\
+            started_quest_ids:[1])";
+        let data: SaveData = ron::from_str(contents).expect("version 2 save is readable");
+        let loaded = game_from_save_data(data, &WorldMap::prototype())
+            .expect("version 2 save migrates to the house-aware format");
+        assert!(loaded.flags.is_set(WorldFlag::BridgeBuilt));
+        assert!(!loaded.flags.is_set(WorldFlag::HouseBuilt));
+        assert!(loaded.quests.has_started(BRIDGE_QUEST_ID));
+        assert!(!loaded.quests.has_started(HOUSE_QUEST_ID));
     }
 
     #[test]
@@ -583,14 +640,18 @@ mod tests {
         assert_eq!(loaded.inventory.count(ItemKind::Wood), 2);
         assert!(loaded.flags.is_set(WorldFlag::BridgeBuilt));
         assert!(loaded.quests.has_started(BRIDGE_QUEST_ID));
-        assert!(loaded
-            .progress
-            .collected_objects
-            .contains(&ObjectInstanceId(500)));
-        assert!(loaded
-            .progress
-            .chopped_trees
-            .contains(&ObjectInstanceId(501)));
+        assert!(
+            loaded
+                .progress
+                .collected_objects
+                .contains(&ObjectInstanceId(500))
+        );
+        assert!(
+            loaded
+                .progress
+                .chopped_trees
+                .contains(&ObjectInstanceId(501))
+        );
 
         fs::remove_dir_all(directory).expect("test save directory is removed");
     }

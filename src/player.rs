@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::scene::WorldFlags;
-use crate::world::{WorldFlag, WorldMap, WORLD_HALF_SIZE, WORLD_SIZE};
+use crate::world::{WORLD_HALF_SIZE, WORLD_SIZE, WorldFlag, WorldMap};
 
 pub(crate) const PLAYER_SPEED: f32 = 5.0;
 pub(crate) const PLAYER_HALF_SIZE: f32 = 0.4;
@@ -35,7 +35,8 @@ pub(crate) struct CameraOrbit {
     yaw: f32,
 }
 
-pub(crate) fn orbit_camera(// カメラをプレイヤーの背中に回転させる
+pub(crate) fn orbit_camera(
+    // カメラをプレイヤーの背中に回転させる
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut orbit: ResMut<CameraOrbit>,
@@ -68,7 +69,8 @@ pub(crate) fn orbit_camera(// カメラをプレイヤーの背中に回転さ�
 }
 
 /// WASD、矢印キー、または接続中ゲームパッドの左スティックでXZ平面を移動する。
-pub(crate) fn move_player(// プレイヤーを移動させる
+pub(crate) fn move_player(
+    // プレイヤーを移動させる
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,

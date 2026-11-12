@@ -7,16 +7,19 @@ use crate::interaction::is_in_interaction_range;
 use crate::inventory::{Inventory, ItemId, ItemKind};
 use crate::player::Player;
 use crate::scene::{
-    Interactable, InteractionAction, ObjectCollider, ObjectEntity, RiversideNpc, WorldFlags,
-    is_near_npc,
+    Interactable, InteractionAction, ObjectCollider, ObjectEntity, WorldFlags, is_near_npc,
 };
-use crate::world::{BRIDGE_SITE_ID, ObjectInstanceId, ObjectKind, WorldFlag, WorldMap};
+use crate::world::{
+    BRIDGE_SITE_ID, HOUSE_BUILDER_NPC_ID, HOUSE_OBJECT_ID, ObjectInstanceId, ObjectKind, WorldFlag,
+    WorldMap,
+};
 
 /// Stable quest catalog key; assigned values must not be changed or reused.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct QuestId(pub(crate) u16);
 
 pub(crate) const BRIDGE_QUEST_ID: QuestId = QuestId(1);
+pub(crate) const HOUSE_QUEST_ID: QuestId = QuestId(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequirementRole {
@@ -25,7 +28,8 @@ enum RequirementRole {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct QuestRequirement {// クエストの必要アイテム情報
+pub(crate) struct QuestRequirement {
+    // クエストの必要アイテム情報
     // item: アイテムID
     // count: 必要数
     // role: アイテムの役割（道具か材料か）
@@ -34,7 +38,8 @@ pub(crate) struct QuestRequirement {// クエストの必要アイテム情報
     role: RequirementRole,
 }
 
-impl QuestRequirement {// クエストの必要アイテム情報に関するメソッド
+impl QuestRequirement {
+    // クエストの必要アイテム情報に関するメソッド
     pub(crate) fn item_kind(self) -> ItemKind {
         ItemKind::from_id(self.item)
             .unwrap_or_else(|| panic!("クエスト定義のアイテムID {} は不正です", self.item.0))
@@ -42,18 +47,24 @@ impl QuestRequirement {// クエストの必要アイテム情報に関するメ
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct QuestDefinition {// クエスト定義情報
+pub(crate) struct QuestDefinition {
+    // クエスト定義情報
     id: QuestId,
     title: &'static str,
     target: ObjectInstanceId,
+    target_kind: ObjectKind,
     completion_flag: WorldFlag,
+    completion_object: ObjectInstanceId,
+    completion_object_kind: ObjectKind,
+    remove_target_on_completion: bool,
     selected_item: ItemId,
     requirements: &'static [QuestRequirement],
     collecting_hint: &'static str,
     return_hint: &'static str,
 }
 
-const BRIDGE_REQUIREMENTS: [QuestRequirement; 2] = [// 橋のクエストに必要なアイテム情報
+const BRIDGE_REQUIREMENTS: [QuestRequirement; 2] = [
+    // 橋のクエストに必要なアイテム情報
     QuestRequirement {
         item: ItemKind::Axe.id(),
         count: 1,
@@ -66,18 +77,64 @@ const BRIDGE_REQUIREMENTS: [QuestRequirement; 2] = [// 橋のクエストに必�
     },
 ];
 
-const QUEST_DEFINITIONS: [QuestDefinition; 1] = [QuestDefinition {// クエスト定義情報
-    id: BRIDGE_QUEST_ID,
-    title: "はしを つくる",
-    target: BRIDGE_SITE_ID,
-    completion_flag: WorldFlag::BridgeBuilt,
-    selected_item: ItemKind::Wood.id(),
-    requirements: &BRIDGE_REQUIREMENTS,
-    collecting_hint: "木を きって 木ざいを あつめよう",
-    return_hint: "かわべの まるたに もどろう",
-}];
+const HOUSE_REQUIREMENTS: [QuestRequirement; 2] = [
+    QuestRequirement {
+        item: ItemKind::Axe.id(),
+        count: 1,
+        role: RequirementRole::Tool,
+    },
+    QuestRequirement {
+        item: ItemKind::Wood.id(),
+        count: 4,
+        role: RequirementRole::Material,
+    },
+];
 
-impl QuestDefinition {// クエスト定義情報に関するメソッド
+const QUEST_DEFINITIONS: [QuestDefinition; 2] = [
+    QuestDefinition {
+        id: BRIDGE_QUEST_ID,
+        title: "はしを つくる",
+        target: BRIDGE_SITE_ID,
+        target_kind: ObjectKind::Log,
+        completion_flag: WorldFlag::BridgeBuilt,
+        completion_object: ObjectInstanceId(2),
+        completion_object_kind: ObjectKind::Bridge,
+        remove_target_on_completion: true,
+        selected_item: ItemKind::Wood.id(),
+        requirements: &BRIDGE_REQUIREMENTS,
+        collecting_hint: "木を きって 木ざいを あつめよう",
+        return_hint: "かわべの まるたに もどろう",
+    },
+    QuestDefinition {
+        id: HOUSE_QUEST_ID,
+        title: "いえを たてる",
+        target: HOUSE_BUILDER_NPC_ID,
+        target_kind: ObjectKind::HouseBuilderNpc,
+        completion_flag: WorldFlag::HouseBuilt,
+        completion_object: HOUSE_OBJECT_ID,
+        completion_object_kind: ObjectKind::House,
+        remove_target_on_completion: false,
+        selected_item: ItemKind::Wood.id(),
+        requirements: &HOUSE_REQUIREMENTS,
+        collecting_hint: "木を 4つ きって 木ざいを あつめよう",
+        return_hint: "もくざいを もって いえの ところへ もどろう",
+    },
+];
+
+impl QuestDefinition {
+    // クエスト定義情報に関するメソッド
+    pub(crate) fn is_complete(&self, flags: &WorldFlags) -> bool {
+        flags.is_set(self.completion_flag)
+    }
+
+    pub(crate) fn completion_flag(&self) -> WorldFlag {
+        self.completion_flag
+    }
+
+    pub(crate) fn removes_target_on_completion(&self) -> bool {
+        self.remove_target_on_completion
+    }
+
     pub(crate) fn selected_item_kind(&self) -> ItemKind {
         ItemKind::from_id(self.selected_item).unwrap_or_else(|| {
             panic!(
@@ -87,7 +144,8 @@ impl QuestDefinition {// クエスト定義情報に関するメソッド
         })
     }
 
-    fn material_count(&self, item: ItemId) -> u32 {// 材料の必要数を取得
+    fn material_count(&self, item: ItemId) -> u32 {
+        // 材料の必要数を取得
         self.requirements
             .iter()
             .filter(|requirement| {
@@ -99,7 +157,8 @@ impl QuestDefinition {// クエスト定義情報に関するメソッド
             .unwrap_or_else(|| panic!("クエスト {} の材料数が大きすぎます", self.id.0))
     }
 
-    fn requirement_count(&self, requirement: QuestRequirement) -> u32 {// 指定された必要アイテムの必要数を取得
+    fn requirement_count(&self, requirement: QuestRequirement) -> u32 {
+        // 指定された必要アイテムの必要数を取得
         match requirement.role {
             RequirementRole::Material => self.material_count(requirement.item),
             RequirementRole::Tool => self
@@ -114,18 +173,33 @@ impl QuestDefinition {// クエスト定義情報に関するメソッド
         }
     }
 
-    pub(crate) fn missing_material(&self, inventory: &Inventory) -> Option<QuestRequirement> {// 不足している材料を取得
+    pub(crate) fn missing_material(&self, inventory: &Inventory) -> Option<QuestRequirement> {
+        // 不足している材料を取得
         self.requirements.iter().copied().find(|requirement| {
             requirement.role == RequirementRole::Material
                 && inventory.count(requirement.item_kind()) < self.material_count(requirement.item)
         })
     }
 
-    pub(crate) fn materials_available(&self, inventory: &Inventory) -> bool {// 材料が揃っているか確認
+    pub(crate) fn collecting_guidance(&self, inventory: &Inventory) -> String {
+        let missing_tool = self.requirements.iter().find(|requirement| {
+            requirement.role == RequirementRole::Tool
+                && inventory.count(requirement.item_kind()) < requirement.count
+        });
+        if let Some(requirement) = missing_tool {
+            format!("{}を さがそう", requirement.item_kind().label())
+        } else {
+            self.collecting_hint.to_owned()
+        }
+    }
+
+    pub(crate) fn materials_available(&self, inventory: &Inventory) -> bool {
+        // 材料が揃っているか確認
         self.missing_material(inventory).is_none()
     }
 
-    pub(crate) fn consume_materials(&self, inventory: &mut Inventory) -> bool {// 材料を消費し、成功したかどうかを返す
+    pub(crate) fn consume_materials(&self, inventory: &mut Inventory) -> bool {
+        // 材料を消費し、成功したかどうかを返す
         if !self.materials_available(inventory) {
             return false;
         }
@@ -151,7 +225,8 @@ impl QuestDefinition {// クエスト定義情報に関するメソッド
         true
     }
 
-    fn guidance(// クエストの進行状況に応じたガイダンスを取得
+    fn guidance(
+        // クエストの進行状況に応じたガイダンスを取得
         // phase: クエストの進行状況
         // inventory: プレイヤーの所持品
         // at_target: クエスト対象地点にいるか
@@ -164,23 +239,13 @@ impl QuestDefinition {// クエスト定義情報に関するメソッド
     ) -> String {
         match phase {
             QuestPhase::NotStarted => String::new(),
-            QuestPhase::Collecting => {
-                let missing_tool = self.requirements.iter().find(|requirement| {
-                    requirement.role == RequirementRole::Tool
-                        && inventory.count(requirement.item_kind()) < requirement.count
-                });
-                if let Some(requirement) = missing_tool {
-                    format!("{}を さがそう", requirement.item_kind().label())
-                } else {
-                    self.collecting_hint.to_owned()
-                }
-            }
+            QuestPhase::Collecting => self.collecting_guidance(inventory),
             QuestPhase::ReadyToReturn if at_target => {
                 if inventory.is_selected(self.selected_item_kind()) {
                     if notebook_open {
                         "メモを とじて [E / South] つくろう".to_owned()
                     } else {
-                        "[E / South] で はしを つくろう".to_owned()
+                        "[E / South] で つくろう".to_owned()
                     }
                 } else if notebook_open {
                     format!(
@@ -201,22 +266,24 @@ pub(crate) fn definition(id: QuestId) -> Option<&'static QuestDefinition> {
     QUEST_DEFINITIONS.iter().find(|quest| quest.id == id)
 }
 
-pub(crate) fn definition_for_site(// 建設地点とフラグに対応するクエスト定義を取得
+pub(crate) fn definition_for_target(
+    id: QuestId,
     target: ObjectInstanceId,
-    flag: WorldFlag,
 ) -> &'static QuestDefinition {
-    QUEST_DEFINITIONS
-        .iter()
-        .find(|quest| quest.target == target && quest.completion_flag == flag)
-        .unwrap_or_else(|| {
-            panic!(
-                "建設地点 {} とフラグ {:?} に対応するクエストがありません",
-                target.0, flag
-            )
-        })
+    let quest = definition(id).unwrap_or_else(|| panic!("未知のクエストIDです: {}", id.0));
+    assert_eq!(
+        quest.target, target,
+        "クエスト {} の対象オブジェクトIDが一致しません: {}",
+        id.0, target.0
+    );
+    quest
 }
 
-pub(crate) fn validate_definitions(world_map: &WorldMap) -> Result<(), Vec<String>> {// クエスト定義の妥当性を検証
+#[derive(Component)]
+pub(crate) struct QuestGiver(pub(crate) QuestId);
+
+pub(crate) fn validate_definitions(world_map: &WorldMap) -> Result<(), Vec<String>> {
+    // クエスト定義の妥当性を検証
     let mut errors = Vec::new();
     let mut quest_ids = HashSet::new();
     let mut targets = HashSet::new();
@@ -240,10 +307,36 @@ pub(crate) fn validate_definitions(world_map: &WorldMap) -> Result<(), Vec<Strin
             .values()
             .flat_map(|chunk| &chunk.objects)
             .find(|object| object.id == quest.target);
-        if !target.is_some_and(|object| {
-            object.kind == ObjectKind::Log && object.completion_flag == Some(quest.completion_flag)
-        }) {
+        let valid_target = target.is_some_and(|object| {
+            object.kind == quest.target_kind
+                && match quest.target_kind {
+                    ObjectKind::Log => object.completion_flag == Some(quest.completion_flag),
+                    ObjectKind::HouseBuilderNpc => object.completion_flag.is_none(),
+                    _ => false,
+                }
+        });
+        if !valid_target {
             errors.push(format!("クエスト {} の建設地点が不正です", quest.id.0));
+        }
+
+        let completed_object = world_map
+            .chunks
+            .values()
+            .flat_map(|chunk| &chunk.objects)
+            .find(|object| object.id == quest.completion_object);
+        let valid_completed_object = completed_object.is_some_and(|object| {
+            object.kind == quest.completion_object_kind
+                && match object.kind {
+                    ObjectKind::Bridge => true,
+                    ObjectKind::House => object.completion_flag == Some(quest.completion_flag),
+                    _ => false,
+                }
+        });
+        if !valid_completed_object {
+            errors.push(format!(
+                "クエスト {} の完成後オブジェクトが不正です",
+                quest.id.0
+            ));
         }
 
         let mut material_counts = HashMap::<ItemId, u32>::new();
@@ -272,15 +365,23 @@ pub(crate) fn validate_definitions(world_map: &WorldMap) -> Result<(), Vec<Strin
     }
 
     for object in world_map.chunks.values().flat_map(|chunk| &chunk.objects) {
-        if object.kind == ObjectKind::Log
-            && !QUEST_DEFINITIONS.iter().any(|quest| {
-                quest.target == object.id && Some(quest.completion_flag) == object.completion_flag
-            })
+        if matches!(object.kind, ObjectKind::Log | ObjectKind::HouseBuilderNpc)
+            && !QUEST_DEFINITIONS
+                .iter()
+                .any(|quest| quest.target == object.id && quest.target_kind == object.kind)
         {
             errors.push(format!(
                 "建設地点 {} に対応するクエストがありません",
                 object.id.0
             ));
+        }
+        if object.kind == ObjectKind::House
+            && !QUEST_DEFINITIONS.iter().any(|quest| {
+                quest.completion_object == object.id
+                    && quest.completion_object_kind == ObjectKind::House
+            })
+        {
+            errors.push(format!("家 {} に対応するクエストがありません", object.id.0));
         }
     }
 
@@ -292,7 +393,8 @@ pub(crate) fn validate_definitions(world_map: &WorldMap) -> Result<(), Vec<Strin
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct QuestLog {// クエストの進行状況を管理
+pub(crate) struct QuestLog {
+    // クエストの進行状況を管理
     started: HashSet<QuestId>,
 }
 
@@ -341,7 +443,8 @@ pub(crate) struct NotebookState {
     block_gameplay: bool,
 }
 
-impl NotebookState {// メモの状態を管理
+impl NotebookState {
+    // メモの状態を管理
     pub(crate) fn is_open(&self) -> bool {
         self.open
     }
@@ -420,18 +523,22 @@ pub(crate) fn gameplay_enabled(notebook: Res<NotebookState>) -> bool {
 }
 
 pub(crate) fn update_quests(
-    players: Query<&Transform, (With<Player>, Without<RiversideNpc>)>,
-    npcs: Query<&Transform, (With<RiversideNpc>, Without<Player>)>,
+    players: Query<&Transform, With<Player>>,
+    npcs: Query<(&Transform, &QuestGiver), Without<Player>>,
     flags: Res<WorldFlags>,
     mut quests: ResMut<QuestLog>,
 ) {
-    let npc_is_near = match (players.single(), npcs.single()) {
-        (Ok(player), Ok(npc)) => is_near_npc(player.translation, npc.translation),
-        _ => false,
+    let Ok(player_transform) = players.single() else {
+        return;
     };
 
-    for quest in &QUEST_DEFINITIONS {
-        if !quests.has_started(quest.id) && (flags.is_set(quest.completion_flag) || npc_is_near) {
+    for (npc_transform, giver) in &npcs {
+        let quest = definition(giver.0)
+            .unwrap_or_else(|| panic!("NPCのクエストIDが不正です: {}", giver.0.0));
+        if !quests.has_started(quest.id)
+            && (quest.is_complete(&flags)
+                || is_near_npc(player_transform.translation, npc_transform.translation))
+        {
             quests.start(quest.id);
         }
     }
@@ -457,7 +564,7 @@ pub(crate) fn update_notebook_ui(
         interactables
             .iter()
             .filter_map(|(object, transform, collider, interactable)| {
-                if !matches!(interactable.action, InteractionAction::BuildBridge(_)) {
+                if !matches!(interactable.action, InteractionAction::BuildQuest(_)) {
                     return None;
                 }
                 let distance = player.translation.distance(transform.translation);
@@ -574,8 +681,16 @@ mod tests {
     #[test]
     fn bridge_quest_definition_and_ids_are_valid() {
         assert_eq!(BRIDGE_QUEST_ID, QuestId(1));
+        assert_eq!(HOUSE_QUEST_ID, QuestId(2));
         assert!(definition(BRIDGE_QUEST_ID).is_some());
+        assert!(definition(HOUSE_QUEST_ID).is_some());
         assert!(definition(QuestId(0)).is_none());
+        assert_eq!(
+            definition(HOUSE_QUEST_ID)
+                .expect("house quest exists")
+                .material_count(ItemKind::Wood.id()),
+            4
+        );
         assert_eq!(validate_definitions(&WorldMap::prototype()), Ok(()));
     }
 
@@ -589,8 +704,10 @@ mod tests {
             .world_mut()
             .spawn((Player::default(), Transform::from_xyz(20.0, 0.0, 0.0)))
             .id();
-        app.world_mut()
-            .spawn((RiversideNpc, Transform::from_xyz(3.2, 0.0, 0.0)));
+        app.world_mut().spawn((
+            QuestGiver(BRIDGE_QUEST_ID),
+            Transform::from_xyz(3.2, 0.0, 0.0),
+        ));
         app.update();
         assert!(
             !app.world()
@@ -619,6 +736,25 @@ mod tests {
                 .resource::<QuestLog>()
                 .has_started(BRIDGE_QUEST_ID)
         );
+    }
+
+    #[test]
+    fn nearby_quest_giver_starts_only_its_own_quest() {
+        let mut app = App::new();
+        app.init_resource::<QuestLog>()
+            .init_resource::<WorldFlags>()
+            .add_systems(Update, update_quests);
+        app.world_mut()
+            .spawn((Player::default(), Transform::from_xyz(9.2, 0.6, 2.5)));
+        app.world_mut().spawn((
+            QuestGiver(HOUSE_QUEST_ID),
+            Transform::from_xyz(9.2, 0.0, 2.5),
+        ));
+        app.update();
+
+        let quests = app.world().resource::<QuestLog>();
+        assert!(quests.has_started(HOUSE_QUEST_ID));
+        assert!(!quests.has_started(BRIDGE_QUEST_ID));
     }
 
     #[test]
@@ -850,7 +986,7 @@ mod tests {
                 half_extents: Vec3::splat(0.5),
             }),
             Interactable {
-                action: InteractionAction::BuildBridge(WorldFlag::BridgeBuilt),
+                action: InteractionAction::BuildQuest(BRIDGE_QUEST_ID),
             },
             Transform::default(),
         ));
@@ -870,7 +1006,7 @@ mod tests {
                 .get::<Text>(hint)
                 .expect("hint exists")
                 .0
-                .contains("[E / South] で はしを つくろう")
+                .contains("[E / South] で つくろう")
         );
     }
 
@@ -879,7 +1015,7 @@ mod tests {
         use crate::interaction::{update_interaction_popups, update_interaction_prompt};
         use crate::inventory::{InventoryHud, update_inventory_hud};
         use crate::scene::{
-            InteractionPopup, InteractionPrompt, NpcDialogueHud, WorldProgress,
+            InteractionPopup, InteractionPrompt, NpcDialogueHud, RiversideNpc, WorldProgress,
             update_riverside_npc,
         };
         use crate::world::ColliderShape;
@@ -889,6 +1025,7 @@ mod tests {
             .init_resource::<Inventory>()
             .init_resource::<WorldFlags>()
             .init_resource::<WorldProgress>()
+            .init_resource::<QuestLog>()
             .add_systems(
                 Update,
                 (
@@ -900,8 +1037,11 @@ mod tests {
             );
         app.world_mut()
             .spawn((Player::default(), Transform::from_xyz(0.0, 0.6, 0.0)));
-        app.world_mut()
-            .spawn((RiversideNpc, Transform::from_xyz(3.2, 0.0, 0.0)));
+        app.world_mut().spawn((
+            RiversideNpc,
+            QuestGiver(BRIDGE_QUEST_ID),
+            Transform::from_xyz(3.2, 0.0, 0.0),
+        ));
         let inventory_hud = app
             .world_mut()
             .spawn((InventoryHud, Text::new(""), Visibility::Hidden))

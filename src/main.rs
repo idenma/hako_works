@@ -8,8 +8,8 @@ mod save;
 mod scene;
 mod world;
 
-use bevy::prelude::*;
 use bevy::app::OnAppExitSystems;
+use bevy::prelude::*;
 use interaction::{perform_interaction, update_interaction_popups, update_interaction_prompt};
 use player::{move_player, orbit_camera};
 use world::WorldMap;
@@ -124,8 +124,7 @@ fn main() {
         )
         .add_systems(
             Update,
-            (inventory::update_inventory_hud, quest::update_notebook_ui)
-                .in_set(UpdateSet::Hud),
+            (inventory::update_inventory_hud, quest::update_notebook_ui).in_set(UpdateSet::Hud),
         )
         .run();
 }
@@ -136,13 +135,15 @@ mod tests {
     use crate::interaction::can_perform_action;
     use crate::inventory::{Inventory, ItemKind};
     use crate::player::wrap_world_coordinate;
+    use crate::quest::{BRIDGE_QUEST_ID, QuestLog};
     use crate::scene::{
-        definition_chunk_coord, nearby_chunk_coords, InteractionAction, WorldFlags, WorldProgress,
+        InteractionAction, WorldFlags, WorldProgress, definition_chunk_coord, nearby_chunk_coords,
     };
-    use crate::world::{ChunkCoord, ObjectInstanceId, WorldFlag, WORLD_HALF_SIZE};
+    use crate::world::{ChunkCoord, ObjectInstanceId, WORLD_HALF_SIZE, WorldFlag};
 
     #[test]
-    fn field_edges_wrap_to_the_opposite_side() {// ワールドの座標がワールドの境界を超えた場合に反対側の座標にラップされることを確認する
+    fn field_edges_wrap_to_the_opposite_side() {
+        // ワールドの座標がワールドの境界を超えた場合に反対側の座標にラップされることを確認する
         assert_eq!(
             wrap_world_coordinate(WORLD_HALF_SIZE + 1.0),
             -WORLD_HALF_SIZE + 1.0
@@ -154,7 +155,8 @@ mod tests {
     }
 
     #[test]
-    fn chunk_streaming_keeps_a_three_by_three_neighborhood() {// チャンクストリーミングが3x3の近傍を維持することを確認する
+    fn chunk_streaming_keeps_a_three_by_three_neighborhood() {
+        // チャンクストリーミングが3x3の近傍を維持することを確認する
         let center = ChunkCoord { x: 10, z: 10 };
         let nearby = nearby_chunk_coords(center);
 
@@ -165,7 +167,8 @@ mod tests {
     }
 
     #[test]
-    fn streamed_world_chunks_map_to_wrapped_definitions() {// ストリーミングされたワールドチャンクがラップされた定義にマップされることを確認する
+    fn streamed_world_chunks_map_to_wrapped_definitions() {
+        // ストリーミングされたワールドチャンクがラップされた定義にマップされることを確認する
         assert_eq!(
             definition_chunk_coord(ChunkCoord { x: -1, z: 20 }),
             ChunkCoord { x: 19, z: 0 }
@@ -173,7 +176,8 @@ mod tests {
     }
 
     #[test]
-    fn bridge_flag_survives_chunk_unload_and_controls_the_reloaded_scene() {// ブリッジフラグがチャンクのアンロード後も保持され、再ロードされたシーンを制御することを確認する
+    fn bridge_flag_survives_chunk_unload_and_controls_the_reloaded_scene() {
+        // ブリッジフラグがチャンクのアンロード後も保持され、再ロードされたシーンを制御することを確認する
         let mut flags = WorldFlags::default();
         let world_map = WorldMap::prototype();
         let river_position = Vec3::new(5.8, 0.0, 0.0);
@@ -193,7 +197,8 @@ mod tests {
     }
 
     #[test]
-    fn forward_input_follows_player_rotation() {// プレイヤーの回転に従って前方入力が変化することを確認する
+    fn forward_input_follows_player_rotation() {
+        // プレイヤーの回転に従って前方入力が変化することを確認する
         let forward_input = Vec3::new(0.0, 0.0, -1.0);
         let facing_south = Quat::IDENTITY * forward_input;
         let facing_west = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2) * forward_input;
@@ -203,7 +208,8 @@ mod tests {
     }
 
     #[test]
-    fn inventory_items_can_be_selected_and_consumed() {// 在庫アイテムが選択され、消費されることを確認する
+    fn inventory_items_can_be_selected_and_consumed() {
+        // 在庫アイテムが選択され、消費されることを確認する
         let mut inventory = Inventory::default();
         inventory.add(ItemKind::Axe, 1);
         inventory.add(ItemKind::Wood, 2);
@@ -220,10 +226,12 @@ mod tests {
     }
 
     #[test]
-    fn interaction_actions_require_the_selected_item_and_only_complete_once() {// 対話アクションが選択されたアイテムを必要とし、一度だけ完了することを確認する
+    fn interaction_actions_require_the_selected_item_and_only_complete_once() {
+        // 対話アクションが選択されたアイテムを必要とし、一度だけ完了することを確認する
         let mut inventory = Inventory::default();
         let mut flags = WorldFlags::default();
         let mut progress = WorldProgress::default();
+        let mut quests = QuestLog::default();
         let tree_id = ObjectInstanceId(501);
 
         assert!(!can_perform_action(
@@ -232,6 +240,7 @@ mod tests {
             &inventory,
             &flags,
             &progress,
+            &quests,
         ));
         inventory.add(ItemKind::Axe, 1);
         assert!(can_perform_action(
@@ -240,6 +249,7 @@ mod tests {
             &inventory,
             &flags,
             &progress,
+            &quests,
         ));
         progress.chopped_trees.insert(tree_id);
         assert!(!can_perform_action(
@@ -248,17 +258,20 @@ mod tests {
             &inventory,
             &flags,
             &progress,
+            &quests,
         ));
 
         inventory.add(ItemKind::Wood, 1);
         inventory.select(ItemKind::Wood);
-        let bridge_action = InteractionAction::BuildBridge(WorldFlag::BridgeBuilt);
+        quests.start(BRIDGE_QUEST_ID);
+        let bridge_action = InteractionAction::BuildQuest(BRIDGE_QUEST_ID);
         assert!(can_perform_action(
             bridge_action,
             ObjectInstanceId(1),
             &inventory,
             &flags,
             &progress,
+            &quests,
         ));
         flags.set(WorldFlag::BridgeBuilt, true);
         assert!(!can_perform_action(
@@ -267,6 +280,7 @@ mod tests {
             &inventory,
             &flags,
             &progress,
+            &quests,
         ));
     }
 }
